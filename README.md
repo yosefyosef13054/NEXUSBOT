@@ -19,7 +19,7 @@
 **The production-grade AI chatbot engine for any Flutter app.**
 **Built with FastAPI + LangChain. API-first, streaming-first, modular by design.**
 
-[Quickstart](#-quickstart) · [Features](#-features) · [Architecture](#-architecture) · [API](#-api-reference) · [Flutter Guide](docs/flutter_integration.md) · [Postman](postman/collection.json)
+[Quickstart](#-quickstart) · [Features](#-features) · [Architecture](#-architecture) · [API](#-api-reference) · [Flutter App](flutter_app/) · [Postman](postman/collection.json)
 
 </div>
 
@@ -287,9 +287,20 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 
 ---
 
-## 📱 Flutter integration
+## 📱 Flutter app
 
-The full Dart guide is in [`docs/flutter_integration.md`](docs/flutter_integration.md) — Dio client with JWT refresh, SSE consumer, WebSocket consumer with auto-reconnect, multipart file upload, and a unified error model.
+A complete production-quality Flutter client ships in [**`flutter_app/`**](flutter_app/) — Riverpod state management, go_router with auth redirect, Dio + JWT refresh, SSE streaming, file upload, dark/crimson brand theme that matches the backend.
+
+```bash
+cd flutter_app
+flutter pub get
+flutter run --dart-define=API_BASE_URL=http://localhost:8000/api/v1
+```
+
+Screens: **Splash · Login · Register · Session list · Chat (streaming) · Documents · Settings**.
+See [`flutter_app/README.md`](flutter_app/README.md) for architecture, design tokens, and platform-specific run commands.
+
+The integration patterns are also documented standalone in [`docs/flutter_integration.md`](docs/flutter_integration.md) if you want to embed NexusBot into an existing Flutter codebase.
 
 A taste — streaming a NexusBot reply in Flutter:
 
