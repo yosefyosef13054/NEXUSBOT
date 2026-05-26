@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1200" height="640" viewBox="0 0 1200 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="System architecture">
+  <title>NexusBot Architecture</title>
+
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#050505"/>
+      <stop offset="60%"  stop-color="#0E0E10"/>
+      <stop offset="100%" stop-color="#180606"/>
+    </linearGradient>
+
+    <linearGradient id="card" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#18181B"/>
+      <stop offset="100%" stop-color="#09090B"/>
+    </linearGradient>
+
+    <linearGradient id="redAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#EF4444"/>
+      <stop offset="100%" stop-color="#7F1D1D"/>
+    </linearGradient>
+
+    <linearGradient id="silverAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#E4E4E7"/>
+      <stop offset="100%" stop-color="#71717A"/>
+    </linearGradient>
+
+    <radialGradient id="emberGlow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%"   stop-color="#EF4444" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="brushed" x="0%" y="0%" width="100%" height="100%">
+      <feTurbulence type="turbulence" baseFrequency="1.4 0.012" numOctaves="2" seed="7"/>
+      <feColorMatrix type="matrix"
+        values="0 0 0 0 1
+                0 0 0 0 1
+                0 0 0 0 1
+                0 0 0 0.12 0"/>
+    </filter>
+
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52525B"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="640" fill="url(#bg)"/>
+  <rect width="1200" height="640" filter="url(#brushed)" opacity="0.6"/>
+  <ellipse cx="900" cy="320" rx="500" ry="320" fill="url(#emberGlow)"/>
+
+  <!-- Title -->
+  <text x="600" y="48" text-anchor="middle" font-family="Inter, sans-serif"
+        font-size="24" font-weight="800" letter-spacing="2" fill="#F8FAFC">
+    NEXUS<tspan fill="#EF4444">BOT</tspan> ARCHITECTURE
+  </text>
+  <text x="600" y="72" text-anchor="middle" font-family="Inter, sans-serif"
+        font-size="12" font-weight="500" letter-spacing="3" fill="#71717A">
+    CLEAN LAYERS · API → SERVICES → AI → DATA
+  </text>
+
+  <!-- ============= TOP ROW: client → API → services ============= -->
+  <g font-family="Inter, sans-serif">
+    <!-- Client -->
+    <rect x="60" y="110" width="220" height="120" rx="14" fill="url(#card)" stroke="#27272A"/>
+    <rect x="60" y="110" width="6" height="120" rx="3" fill="url(#silverAccent)"/>
+    <text x="170" y="145" text-anchor="middle" font-size="16" font-weight="800" fill="#F8FAFC">Flutter Clients</text>
+    <text x="170" y="172" text-anchor="middle" font-size="13" fill="#A1A1AA">Mobile · Web · Desktop</text>
+    <text x="170" y="195" text-anchor="middle" font-size="12" fill="#71717A">REST · SSE · WebSocket</text>
+
+    <!-- API -->
+    <rect x="370" y="110" width="280" height="120" rx="14" fill="url(#card)" stroke="#27272A"/>
+    <rect x="370" y="110" width="6" height="120" rx="3" fill="url(#silverAccent)"/>
+    <text x="510" y="145" text-anchor="middle" font-size="16" font-weight="800" fill="#F8FAFC">FastAPI · /api/v1</text>
+    <text x="510" y="172" text-anchor="middle" font-size="13" fill="#A1A1AA">auth · sessions · chat · documents · ws</text>
+    <text x="510" y="195" text-anchor="middle" font-size="12" fill="#71717A">JWT + API Key · Rate Limit · CORS</text>
+
+    <!-- Services -->
+    <rect x="740" y="110" width="280" height="120" rx="14" fill="url(#card)" stroke="#27272A"/>
+    <rect x="740" y="110" width="6" height="120" rx="3" fill="url(#silverAccent)"/>
+    <text x="880" y="145" text-anchor="middle" font-size="16" font-weight="800" fill="#F8FAFC">Services</text>
+    <text x="880" y="172" text-anchor="middle" font-size="13" fill="#A1A1AA">auth · session · chat · document · usage</text>
+    <text x="880" y="195" text-anchor="middle" font-size="12" fill="#71717A">Domain orchestration</text>
+  </g>
+
+  <!-- ============= MIDDLE: AI layer (the highlight) ============= -->
+  <g font-family="Inter, sans-serif">
+    <!-- Outer card with red accent -->
+    <rect x="200" y="290" width="800" height="210" rx="18" fill="url(#card)" stroke="#7F1D1D"/>
+    <rect x="200" y="290" width="6" height="210" rx="3" fill="url(#redAccent)"/>
+    <text x="600" y="324" text-anchor="middle" font-size="18" font-weight="900" letter-spacing="2" fill="#F8FAFC">
+      LANGCHAIN AI LAYER
+    </text>
+    <text x="600" y="346" text-anchor="middle" font-size="12" font-weight="500" letter-spacing="3" fill="#EF4444">
+      ORCHESTRATOR · CHAINS · TOOLS · MEMORY · RAG
+    </text>
+
+    <!-- Mini-cards -->
+    <g>
+      <rect x="240" y="360" width="170" height="120" rx="12" fill="#0A0A0A" stroke="#27272A"/>
+      <rect x="240" y="360" width="4" height="120" rx="2" fill="#EF4444"/>
+      <text x="325" y="390" text-anchor="middle" font-size="13" font-weight="800" fill="#F8FAFC">Chains</text>
+      <text x="325" y="414" text-anchor="middle" font-size="11" fill="#A1A1AA">chat · rag · agent</text>
+      <text x="325" y="436" text-anchor="middle" font-size="11" fill="#A1A1AA">prompts · output parsers</text>
+      <text x="325" y="458" text-anchor="middle" font-size="11" fill="#A1A1AA">runnable composition</text>
+    </g>
+
+    <g>
+      <rect x="430" y="360" width="170" height="120" rx="12" fill="#0A0A0A" stroke="#27272A"/>
+      <rect x="430" y="360" width="4" height="120" rx="2" fill="#EF4444"/>
+      <text x="515" y="390" text-anchor="middle" font-size="13" font-weight="800" fill="#F8FAFC">Memory</text>
+      <text x="515" y="414" text-anchor="middle" font-size="11" fill="#A1A1AA">short-term window</text>
+      <text x="515" y="436" text-anchor="middle" font-size="11" fill="#A1A1AA">rolling summary</text>
+      <text x="515" y="458" text-anchor="middle" font-size="11" fill="#A1A1AA">auto compaction</text>
+    </g>
+
+    <g>
+      <rect x="620" y="360" width="170" height="120" rx="12" fill="#0A0A0A" stroke="#27272A"/>
+      <rect x="620" y="360" width="4" height="120" rx="2" fill="#EF4444"/>
+      <text x="705" y="390" text-anchor="middle" font-size="13" font-weight="800" fill="#F8FAFC">Tools</text>
+      <text x="705" y="414" text-anchor="middle" font-size="11" fill="#A1A1AA">calculator · web search</text>
+      <text x="705" y="436" text-anchor="middle" font-size="11" fill="#A1A1AA">database · custom</text>
+      <text x="705" y="458" text-anchor="middle" font-size="11" fill="#A1A1AA">registry-based</text>
+    </g>
+
+    <g>
+      <rect x="810" y="360" width="170" height="120" rx="12" fill="#0A0A0A" stroke="#27272A"/>
+      <rect x="810" y="360" width="4" height="120" rx="2" fill="#EF4444"/>
+      <text x="895" y="390" text-anchor="middle" font-size="13" font-weight="800" fill="#F8FAFC">RAG</text>
+      <text x="895" y="414" text-anchor="middle" font-size="11" fill="#A1A1AA">load · split · embed</text>
+      <text x="895" y="436" text-anchor="middle" font-size="11" fill="#A1A1AA">pgvector + HNSW</text>
+      <text x="895" y="458" text-anchor="middle" font-size="11" fill="#A1A1AA">citations · semantic search</text>
+    </g>
+  </g>
+
+  <!-- ============= BOTTOM ROW: data + infra ============= -->
+  <g font-family="Inter, sans-serif">
+    <rect x="120" y="540" width="220" height="80" rx="14" fill="url(#card)" stroke="#27272A"/>
+    <rect x="120" y="540" width="6" height="80" rx="3" fill="url(#silverAccent)"/>
+    <text x="230" y="572" text-anchor="middle" font-size="14" font-weight="800" fill="#F8FAFC">Postgres + pgvector</text>
+    <text x="230" y="594" text-anchor="middle" font-size="11" fill="#A1A1AA">users · sessions · messages · chunks</text>
+
+    <rect x="380" y="540" width="200" height="80" rx="14" fill="url(#card)" stroke="#27272A"/>
+    <rect x="380" y="540" width="6" height="80" rx="3" fill="url(#silverAccent)"/>
+    <text x="480" y="572" text-anchor="middle" font-size="14" font-weight="800" fill="#F8FAFC">Redis</text>
+    <text x="480" y="594" text-anchor="middle" font-size="11" fill="#A1A1AA">cache · rate limit · broker</text>
+
+    <rect x="620" y="540" width="220" height="80" rx="14" fill="url(#card)" stroke="#27272A"/>
+    <rect x="620" y="540" width="6" height="80" rx="3" fill="url(#silverAccent)"/>
+    <text x="730" y="572" text-anchor="middle" font-size="14" font-weight="800" fill="#F8FAFC">Celery Workers</text>
+    <text x="730" y="594" text-anchor="middle" font-size="11" fill="#A1A1AA">document ingestion · background jobs</text>
+
+    <rect x="880" y="540" width="200" height="80" rx="14" fill="url(#card)" stroke="#7F1D1D"/>
+    <rect x="880" y="540" width="6" height="80" rx="3" fill="url(#redAccent)"/>
+    <text x="980" y="572" text-anchor="middle" font-size="14" font-weight="800" fill="#F8FAFC">LLM Provider</text>
+    <text x="980" y="594" text-anchor="middle" font-size="11" fill="#A1A1AA">OpenAI · swap in one file</text>
+  </g>
+
+  <!-- Arrows -->
+  <g stroke="#52525B" stroke-width="1.5" fill="none">
+    <line x1="280" y1="170" x2="368" y2="170" marker-end="url(#arrow)"/>
+    <line x1="650" y1="170" x2="738" y2="170" marker-end="url(#arrow)"/>
+    <line x1="880" y1="230" x2="600" y2="285" marker-end="url(#arrow)"/>
+    <line x1="600" y1="500" x2="230" y2="538" marker-end="url(#arrow)"/>
+    <line x1="600" y1="500" x2="480" y2="538" marker-end="url(#arrow)"/>
+    <line x1="600" y1="500" x2="730" y2="538" marker-end="url(#arrow)"/>
+    <line x1="600" y1="500" x2="980" y2="538" marker-end="url(#arrow)"/>
+  </g>
+</svg>

@@ -1,0 +1,229 @@
+{
+  "info": {
+    "name": "NexusBot",
+    "_postman_id": "nexusbot-v1",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "NexusBot — production AI chatbot backend: multi-session chat, streaming, RAG, tools, JWT/API key auth."
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000/api/v1" },
+    { "key": "access_token", "value": "" },
+    { "key": "refresh_token", "value": "" },
+    { "key": "api_key", "value": "" },
+    { "key": "session_id", "value": "" },
+    { "key": "document_id", "value": "" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"demo@example.com\",\n  \"password\": \"demopassword\",\n  \"full_name\": \"Demo\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const json = pm.response.json();",
+              "pm.collectionVariables.set('access_token', json.access_token);",
+              "pm.collectionVariables.set('refresh_token', json.refresh_token);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"demo@example.com\",\n  \"password\": \"demopassword\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Refresh",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/refresh",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Me",
+          "request": { "method": "GET", "url": "{{baseUrl}}/auth/me" }
+        },
+        {
+          "name": "Create API key",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/api-keys",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"flutter-prod\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sessions",
+      "item": [
+        {
+          "name": "Create session",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.collectionVariables.set('session_id', pm.response.json().id);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": null,\n  \"system_prompt\": \"You are a helpful assistant.\"\n}"
+            }
+          }
+        },
+        {
+          "name": "List sessions",
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions?page=1&page_size=20" }
+        },
+        {
+          "name": "Get session",
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/{{session_id}}" }
+        },
+        {
+          "name": "Update session",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/sessions/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Customer onboarding chat\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete session",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/sessions/{{session_id}}" }
+        }
+      ]
+    },
+    {
+      "name": "Chat",
+      "item": [
+        {
+          "name": "Send message",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Hello! What can you do?\",\n  \"use_rag\": true,\n  \"use_tools\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "Stream message (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "text/event-stream" }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/stream",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Stream a 3-sentence intro\",\n  \"use_rag\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "Regenerate last response",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/regenerate",
+            "body": { "mode": "raw", "raw": "{\n  \"temperature\": 0.7\n}" }
+          }
+        },
+        {
+          "name": "History",
+          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/{{session_id}}/messages?limit=50" }
+        },
+        {
+          "name": "Search",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/search",
+            "body": { "mode": "raw", "raw": "{\n  \"query\": \"invoice\",\n  \"limit\": 20\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Documents (RAG)",
+      "item": [
+        {
+          "name": "Upload document",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.collectionVariables.set('document_id', pm.response.json().document.id);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/documents",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file" },
+                { "key": "session_id", "value": "{{session_id}}", "type": "text" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List documents",
+          "request": { "method": "GET", "url": "{{baseUrl}}/documents?page=1&page_size=20" }
+        },
+        {
+          "name": "Get document",
+          "request": { "method": "GET", "url": "{{baseUrl}}/documents/{{document_id}}" }
+        },
+        {
+          "name": "Delete document",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/documents/{{document_id}}" }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        { "name": "Liveness",  "request": { "method": "GET", "url": "{{baseUrl}}/healthz" } },
+        { "name": "Readiness", "request": { "method": "GET", "url": "{{baseUrl}}/readyz" } }
+      ]
+    }
+  ]
+}
