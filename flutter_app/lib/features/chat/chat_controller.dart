@@ -44,7 +44,7 @@ class ChatState {
 class ChatController extends StateNotifier<ChatState> {
   ChatController(this._ref, this.sessionId) : super(ChatState.empty) {
     final prefs = _ref.read(prefsProvider);
-    state = state.copyWith(useRag: prefs.ragByDefault);
+    state = state.copyWith(useRag: prefs.ragByDefault, useTools: true);
     unawaited(_load());
   }
 
