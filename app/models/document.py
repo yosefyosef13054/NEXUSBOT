@@ -37,7 +37,7 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[DocumentStatus] = mapped_column(
-        Enum(DocumentStatus, name="document_status"),
+        Enum(DocumentStatus, name="document_status", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
         default=DocumentStatus.PENDING,
     )

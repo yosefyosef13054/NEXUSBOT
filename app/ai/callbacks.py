@@ -22,8 +22,10 @@ class StreamCollector(AsyncCallbackHandler):
     started_at: float = field(default_factory=time.time)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    saw_token: bool = False
 
     async def on_llm_new_token(self, token: str, **_: Any) -> None:
+        self.saw_token = True
         await self.queue.put({"type": "token", "data": token})
 
     async def on_llm_end(self, response, **_: Any) -> None:

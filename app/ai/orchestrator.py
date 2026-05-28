@@ -151,14 +151,16 @@ async def stream(db: AsyncSession, req: GenerationRequest) -> AsyncIterator[dict
             if req.use_tools:
                 result = await runnable.ainvoke(inputs, config=config)
                 final = str(result.get("output", "")).strip()
-                if final and not accumulator:
-                    # Agents don't always stream their final answer; emit it as a single token frame.
+                if final and not collector.saw_token:
+                    # Agents don't always stream their final answer; emit it as a single token
+                    # frame. The consumer loop below appends it to `accumulator`.
                     await collector.queue.put({"type": "token", "data": final})
-                    accumulator.append(final)
             else:
-                async for chunk in runnable.astream(inputs, config=config):
-                    if isinstance(chunk, str) and chunk:
-                        accumulator.append(chunk)
+                # Drive the stream to completion. Tokens reach the client (and `accumulator`)
+                # via the streaming callback -> token events in the consumer loop below, so we
+                # must NOT also accumulate the astream chunks here (that double-counts the text).
+                async for _ in runnable.astream(inputs, config=config):
+                    pass
         finally:
             await collector.finalize()
 

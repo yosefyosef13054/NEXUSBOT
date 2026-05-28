@@ -47,7 +47,10 @@ class ChatMessage(Base):
         index=True,
         nullable=False,
     )
-    role: Mapped[MessageRole] = mapped_column(Enum(MessageRole, name="message_role"), nullable=False)
+    role: Mapped[MessageRole] = mapped_column(
+        Enum(MessageRole, name="message_role", values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+    )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Optional structured info: tool calls, citations, model, latency.

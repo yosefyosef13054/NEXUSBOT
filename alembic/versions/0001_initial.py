@@ -74,7 +74,7 @@ def upgrade() -> None:
     op.create_index("ix_chat_sessions_user_id", "chat_sessions", ["user_id"])
 
     message_role = postgresql.ENUM(
-        "system", "user", "assistant", "tool", name="message_role", create_type=True
+        "system", "user", "assistant", "tool", name="message_role", create_type=False
     )
     message_role.create(op.get_bind(), checkfirst=True)
 
@@ -95,7 +95,7 @@ def upgrade() -> None:
     op.create_index("ix_chat_messages_created_at", "chat_messages", ["created_at"])
 
     document_status = postgresql.ENUM(
-        "pending", "processing", "ready", "failed", name="document_status", create_type=True
+        "pending", "processing", "ready", "failed", name="document_status", create_type=False
     )
     document_status.create(op.get_bind(), checkfirst=True)
 
