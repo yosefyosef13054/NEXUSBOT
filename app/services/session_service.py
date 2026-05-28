@@ -74,6 +74,10 @@ async def update_session(
     if meta is not None:
         obj.meta = {**(obj.meta or {}), **meta}
     await db.flush()
+    # `updated_at` is set server-side via onupdate, so it's expired after the
+    # UPDATE. Refresh now (in the async context) so response serialization
+    # doesn't trigger a lazy load on a sync greenlet (MissingGreenlet -> 500).
+    await db.refresh(obj)
     return obj
 
 

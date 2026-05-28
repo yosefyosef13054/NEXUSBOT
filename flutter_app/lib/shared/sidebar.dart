@@ -63,28 +63,11 @@ class _SidebarState extends ConsumerState<Sidebar> {
   }
 
   Future<void> _rename(ChatSession s) async {
-    final ctrl = TextEditingController(text: s.title);
     final newTitle = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Rename chat'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Chat name'),
-          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
-            style: FilledButton.styleFrom(backgroundColor: NexusColors.crimson),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (ctx) => _RenameDialog(initial: s.title),
     );
-    ctrl.dispose();
+    if (!mounted) return;
     if (newTitle == null || newTitle.isEmpty || newTitle == s.title) return;
     final repo = await ref.read(chatRepositoryProvider.future);
     await repo.renameSession(s.id, newTitle);
@@ -476,6 +459,52 @@ class _SessionSkeletons extends StatelessWidget {
         padding: EdgeInsets.symmetric(vertical: 6),
         child: Skeleton(width: double.infinity, height: 32, radius: 10),
       ),
+    );
+  }
+}
+
+/// Rename dialog that owns its own [TextEditingController] and disposes it in
+/// [State.dispose] — which Flutter calls only after the dialog's exit animation
+/// finishes. Disposing the controller inline (right after `showDialog` returns)
+/// crashes with a red screen, because the TextField is still mounted and using
+/// the controller while the route animates out.
+class _RenameDialog extends StatefulWidget {
+  const _RenameDialog({required this.initial});
+  final String initial;
+
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final TextEditingController _ctrl = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(_ctrl.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Rename chat'),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        decoration: const InputDecoration(hintText: 'Chat name'),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+        FilledButton(
+          onPressed: _submit,
+          style: FilledButton.styleFrom(backgroundColor: NexusColors.crimson),
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }
