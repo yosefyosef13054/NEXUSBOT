@@ -24,6 +24,12 @@ class HomeShell extends ConsumerStatefulWidget {
 class HomeShellState extends ConsumerState<HomeShell> {
   String? _selectedSessionId;
   _HomeRoute _route = _HomeRoute.chat;
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  /// Opens the shell's navigation drawer (mobile layout). Called from the
+  /// hamburger button, which lives inside an inner screen's Scaffold and so
+  /// can't reach this drawer via `Scaffold.of`.
+  void openDrawer() => _scaffoldKey.currentState?.openDrawer();
 
   void selectSession(String id) {
     setState(() {
@@ -112,6 +118,7 @@ class HomeShellState extends ConsumerState<HomeShell> {
     }
 
     return Scaffold(
+      key: _scaffoldKey,
       backgroundColor: t.background,
       drawer: Drawer(
         backgroundColor: t.surface,
@@ -188,7 +195,7 @@ class MenuButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return IconButton(
       icon: const Icon(Icons.menu_rounded),
-      onPressed: () => Scaffold.maybeOf(context)?.openDrawer(),
+      onPressed: () => context.findAncestorStateOfType<HomeShellState>()?.openDrawer(),
     );
   }
 }
