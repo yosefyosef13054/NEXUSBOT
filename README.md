@@ -98,6 +98,10 @@ curl -N -X POST localhost:8000/api/v1/sessions/$SID/messages/stream \
   -H 'accept: text/event-stream' -d '{"content":"Tell me a joke"}'
 ```
 
+Object storage: `docker compose --profile s3 up` adds MinIO (console on :9001); point the API
+at it with `STORAGE_BACKEND=s3 S3_BUCKET=nexusbot S3_ENDPOINT_URL=http://minio:9000
+S3_ACCESS_KEY_ID=nexusbot S3_SECRET_ACCESS_KEY=nexusbot-secret`.
+
 Production: `docker compose -f docker-compose.prod.yml up -d --build` (immutable images, no
 reload, migrations as a one-shot job, multiple uvicorn workers).
 
