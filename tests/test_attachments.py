@@ -327,3 +327,14 @@ async def test_local_and_s3_storage_backends(tmp_path):
     assert await s3.presigned_url("k/t.txt", expires_seconds=0) is None
     await s3.delete("k/t.txt")
     assert client.deleted == ["k/t.txt"]
+
+
+def test_prompt_token_estimate_ignores_image_payloads():
+    from app.ai.orchestrator import _estimable_text, _image_parts
+
+    content = [
+        {"type": "text", "text": "describe this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 100_000}},
+    ]
+    assert _estimable_text(content) == "describe this" and _image_parts(content) == 1
+    assert _estimable_text("plain") == "plain" and _image_parts("plain") == 0

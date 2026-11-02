@@ -314,11 +314,34 @@ def estimate_prompt_tokens(req: GenerationRequest, inputs: dict[str, Any]) -> in
         )
         messages = prompt.format_messages(**{**inputs, "agent_scratchpad": []})
         return count_message_tokens(
-            (m.content if isinstance(m.content, str) else str(m.content) for m in messages),
-            model=req.progress.model or None,
-        )
+            (_estimable_text(m.content) for m in messages), model=req.progress.model or None
+        ) + IMAGE_TOKEN_ESTIMATE * sum(_image_parts(m.content) for m in messages)
     except Exception:  # noqa: BLE001
         return count_tokens(req.user_input)
+
+
+# Rough per-image prompt cost when the provider reports no usage (OpenAI "high detail" tile).
+IMAGE_TOKEN_ESTIMATE = 765
+
+
+def _estimable_text(content: Any) -> str:
+    """Text of a message without base64 image payloads (they are not tokens)."""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, dict):
+            if part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        else:
+            parts.append(str(part))
+    return "\n".join(parts)
+
+
+def _image_parts(content: Any) -> int:
+    if isinstance(content, str):
+        return 0
+    return sum(1 for part in content if isinstance(part, dict) and part.get("type") == "image_url")
 
 
 def _cancel(task: asyncio.Task | None) -> None:
