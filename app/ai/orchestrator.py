@@ -3,36 +3,49 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
-from uuid import UUID
+from dataclasses import asdict, dataclass, field
+from typing import Any, AsyncIterator, Awaitable, Callable, TypeVar
+from uuid import UUID, uuid4
 
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.agents.tool_agent import build_tool_agent
+from app.ai.agents.checkpointer import get_checkpointer
+from app.ai.agents.runner import AgentOutcome, AgentRunner
 from app.ai.callbacks import StreamCollector
 from app.ai.chains.chat_chain import build_chat_chain
 from app.ai.chains.rag_chain import build_rag_chain
-from app.ai.llm import chat_model_name
+from app.ai.llm import build_chat_llm
 from app.ai.memory.long_term import load_session_summary
 from app.ai.memory.short_term import load_recent_history
 from app.ai.memory.summarizer import maybe_compact_history
 from app.ai.prompts.templates import build_chat_prompt
+from app.ai.providers.catalog import ModelSpec
+from app.ai.providers.registry import get_registry
+from app.ai.rag.query import rewrite_query
 from app.ai.rag.retriever import RetrievedChunk, format_context, retrieve_chunks
 from app.ai.tools.context import ToolContext
+from app.ai.tools.registry import get_tools, requires_approval
 from app.config import settings
 from app.core.exceptions import AIProviderError
 from app.core.logger import get_logger
-from app.core.metrics import ACTIVE_GENERATIONS, INTERRUPTED_GENERATIONS, LLM_LATENCY, LLM_REQUESTS
+from app.core.metrics import ACTIVE_GENERATIONS, APPROVALS, INTERRUPTED_GENERATIONS, LLM_LATENCY, LLM_REQUESTS
 from app.models.chat import ChatSession
 from app.utils.tokens import count_message_tokens, count_tokens
 
 logger = get_logger(__name__)
 
+T = TypeVar("T")
+
 # Queue poll interval while a generation streams; bounds how fast a stop request or the
 # generation deadline is noticed when the model is silent.
 _POLL_SECONDS = 0.25
+
+STATUS_OK = "ok"
+STATUS_INTERRUPTED = "interrupted"
+STATUS_ERROR = "error"
+STATUS_AWAITING_APPROVAL = "awaiting_approval"
 
 
 @dataclass
@@ -45,16 +58,19 @@ class GenerationProgress:
 
     text_parts: list[str] = field(default_factory=list)
     citations: list[dict[str, Any]] = field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)  # live callback view
+    tool_runs: list[dict[str, Any]] = field(default_factory=list)  # authoritative, from the agent state
     prompt_tokens: int = 0
     completion_tokens: int = 0
     embedding_tokens: int = 0
     model: str = ""
+    provider: str = ""
     started_at: float = field(default_factory=time.time)
     interrupted: bool = False
     interrupt_reason: str | None = None  # stop | disconnect | timeout
     errored: bool = False
     finished: bool = False
+    approval: dict[str, Any] | None = None
 
     @property
     def text(self) -> str:
@@ -63,6 +79,16 @@ class GenerationProgress:
     @property
     def latency_ms(self) -> int:
         return int((time.time() - self.started_at) * 1000)
+
+    @property
+    def status(self) -> str:
+        if self.errored:
+            return STATUS_ERROR
+        if self.interrupted:
+            return STATUS_INTERRUPTED
+        if self.approval:
+            return STATUS_AWAITING_APPROVAL
+        return STATUS_OK
 
 
 @dataclass
@@ -73,6 +99,10 @@ class GenerationRequest:
     use_rag: bool = True
     use_tools: bool = False
     tool_names: list[str] | None = None
+    # Model resolution: request → session → user default → server default.
+    model: str | None = None
+    user_default_model: str | None = None
+    collection_ids: list[UUID] | None = None
     temperature: float | None = None
     max_tokens: int | None = None
     streaming: bool = True
@@ -81,6 +111,9 @@ class GenerationRequest:
     # finishes with `interrupted=True` carrying the partial text.
     stop_event: asyncio.Event | None = None
     progress: GenerationProgress = field(default_factory=GenerationProgress)
+    # LangGraph thread for agent turns (persisted with pending approvals).
+    thread_id: str = field(default_factory=lambda: uuid4().hex)
+    spec: ModelSpec | None = None
 
     @property
     def tool_context(self) -> ToolContext:
@@ -92,25 +125,33 @@ class GenerationResult:
     text: str
     citations: list[RetrievedChunk] = field(default_factory=list)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_runs: list[dict[str, Any]] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     embedding_tokens: int = 0
     latency_ms: int = 0
     model: str = ""
+    provider: str = ""
     interrupted: bool = False
+    approval: dict[str, Any] | None = None
+    thread_id: str = ""
+    status: str = STATUS_OK
 
 
 def citations_payload(citations: list[RetrievedChunk]) -> list[dict[str, Any]]:
-    return [
-        {
-            "document_id": str(c.document_id),
-            "document_name": c.document_name,
-            "chunk_index": c.chunk_index,
-            "score": round(c.score, 4),
-            "excerpt": c.content[:300],
-        }
-        for c in citations
-    ]
+    return [c.to_citation() for c in citations]
+
+
+def resolve_spec_for(req: GenerationRequest) -> ModelSpec:
+    spec = req.spec or get_registry().resolve(req.model, req.session.model, req.user_default_model)
+    _use_spec(req, spec)
+    return spec
+
+
+def _use_spec(req: GenerationRequest, spec: ModelSpec) -> None:
+    req.spec = spec
+    req.progress.model = spec.id
+    req.progress.provider = spec.provider
 
 
 async def _prepare_inputs(
@@ -127,35 +168,33 @@ async def _prepare_inputs(
     }
 
     if req.use_rag:
+        search_query = req.user_input
+        if settings.RAG_QUERY_REWRITE and history:
+            search_query = await rewrite_query(history, req.user_input, spec=req.spec)
         retrieval = await retrieve_chunks(
-            db, user_id=req.user_id, query=req.user_input, session_id=req.session.id
+            db,
+            user_id=req.user_id,
+            query=search_query,
+            session_id=req.session.id,
+            collection_ids=req.collection_ids,
+            spec=req.spec,
         )
         citations = retrieval.chunks
         req.progress.embedding_tokens = retrieval.query_tokens
         inputs["context"] = format_context(citations)
 
     req.progress.citations = citations_payload(citations)
-    req.progress.model = chat_model_name()
     return inputs, citations
 
 
-def _build_runnable(req: GenerationRequest):
-    if req.use_tools:
-        return build_tool_agent(
-            ctx=req.tool_context,
-            use_rag=req.use_rag,
-            tool_names=req.tool_names,
-            system_prompt=req.session.system_prompt,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            streaming=req.streaming,
-        )
+def _build_chain(req: GenerationRequest):
     builder = build_rag_chain if req.use_rag else build_chat_chain
     return builder(
         system_prompt=req.session.system_prompt,
         temperature=req.temperature,
         max_tokens=req.max_tokens,
         streaming=req.streaming,
+        spec=req.spec,
     )
 
 
@@ -167,10 +206,34 @@ def _run_config(req: GenerationRequest, collector: StreamCollector) -> RunnableC
             "session_id": str(req.session.id),
             "user_id": str(req.user_id),
             "request_id": req.request_id or "",
+            "model": req.progress.model,
             "use_rag": req.use_rag,
             "use_tools": req.use_tools,
         },
     }
+
+
+def initial_agent_messages(req: GenerationRequest, inputs: dict[str, Any]) -> list[BaseMessage]:
+    prompt = build_chat_prompt(system_prompt=req.session.system_prompt, use_rag=req.use_rag, use_tools=True)
+    return prompt.format_messages(**{**inputs, "agent_scratchpad": []})
+
+
+async def _agent_runner(req: GenerationRequest, collector: StreamCollector) -> AgentRunner:
+    tools = get_tools(req.tool_names, req.tool_context)
+    llm = build_chat_llm(
+        spec=req.spec, temperature=req.temperature, max_tokens=req.max_tokens, streaming=req.streaming
+    )
+    return AgentRunner(
+        llm=llm,
+        tools=tools,
+        approval_required={t.name for t in tools if requires_approval(t.name)},
+        thread_id=req.thread_id,
+        checkpointer=await get_checkpointer(),
+        callbacks=[collector],
+        metadata=_run_config(req, collector)["metadata"],
+        max_steps=settings.AGENT_MAX_STEPS,
+        tool_timeout_seconds=settings.AGENT_MAX_TOOL_SECONDS,
+    )
 
 
 def estimate_prompt_tokens(req: GenerationRequest, inputs: dict[str, Any]) -> int:
@@ -182,7 +245,8 @@ def estimate_prompt_tokens(req: GenerationRequest, inputs: dict[str, Any]) -> in
         )
         messages = prompt.format_messages(**{**inputs, "agent_scratchpad": []})
         return count_message_tokens(
-            m.content if isinstance(m.content, str) else str(m.content) for m in messages
+            (m.content if isinstance(m.content, str) else str(m.content) for m in messages),
+            model=req.progress.model or None,
         )
     except Exception:  # noqa: BLE001
         return count_tokens(req.user_input)
@@ -193,44 +257,92 @@ def _cancel(task: asyncio.Task | None) -> None:
         task.cancel()
 
 
+async def _with_fallback(
+    req: GenerationRequest,
+    attempt: Callable[[], Awaitable[T]],
+    *,
+    operation: str,
+    collector: StreamCollector | None = None,
+) -> T:
+    """Run `attempt` on the resolved model, retrying once per configured fallback model.
+
+    Fallbacks only kick in before anything was streamed to the client — a reply cannot be
+    restarted on another model once tokens are out.
+    """
+    assert req.spec is not None
+    chain = [req.spec, *get_registry().fallbacks_for(req.spec.id)]
+    last_exc: BaseException | None = None
+    for index, spec in enumerate(chain):
+        if index > 0:
+            logger.warning("model_fallback", from_model=chain[index - 1].id, to_model=spec.id)
+            req.thread_id = uuid4().hex
+        _use_spec(req, spec)
+        try:
+            return await attempt()
+        except (TimeoutError, asyncio.CancelledError):
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            LLM_REQUESTS.labels(spec.id, operation, "error").inc()
+            if collector is not None and collector.saw_token:
+                raise
+            logger.warning("model_call_failed", model=spec.id, error=str(e)[:300])
+    assert last_exc is not None
+    raise last_exc
+
+
+def _absorb_outcome(req: GenerationRequest, collector: StreamCollector | None, outcome: AgentOutcome) -> str:
+    p = req.progress
+    p.tool_runs = [asdict(r) for r in outcome.tool_runs]
+    if outcome.approval:
+        p.approval = {"thread_id": req.thread_id, **outcome.approval}
+        APPROVALS.labels("requested").inc()
+        return ""
+    return outcome.final_text
+
+
 async def generate(db: AsyncSession, req: GenerationRequest) -> GenerationResult:
     """One-shot, non-streaming generation. Used by the blocking endpoint, regenerate and tests."""
     p = req.progress
+    resolve_spec_for(req)
     inputs, citations = await _prepare_inputs(db, req)
-    runnable = _build_runnable(req)
     collector = StreamCollector(emit_events=False)
-    config = _run_config(req, collector)
     operation = "agent" if req.use_tools else "chat"
+
+    async def attempt() -> Any:
+        if req.use_tools:
+            runner = await _agent_runner(req, collector)
+            return await asyncio.wait_for(
+                runner.start(initial_agent_messages(req, inputs)), timeout=settings.GENERATION_TIMEOUT_SECONDS
+            )
+        chain = _build_chain(req)
+        return await asyncio.wait_for(
+            chain.ainvoke(inputs, config=_run_config(req, collector)),
+            timeout=settings.GENERATION_TIMEOUT_SECONDS,
+        )
 
     ACTIVE_GENERATIONS.inc()
     try:
-        output = await asyncio.wait_for(
-            runnable.ainvoke(inputs, config=config), timeout=settings.GENERATION_TIMEOUT_SECONDS
-        )
+        output = await _with_fallback(req, attempt, operation=operation)
     except TimeoutError:
         LLM_REQUESTS.labels(p.model, operation, "timeout").inc()
         raise AIProviderError(
             "Generation timed out", details={"timeout_seconds": settings.GENERATION_TIMEOUT_SECONDS}
         )
+    except AIProviderError:
+        raise
     except Exception as e:  # noqa: BLE001
-        LLM_REQUESTS.labels(p.model, operation, "error").inc()
         logger.exception("ai_generate_failed", error=str(e))
         raise AIProviderError("Upstream AI provider failed", details={"reason": str(e)[:300]})
     finally:
         ACTIVE_GENERATIONS.dec()
 
     if req.use_tools:
-        text = str(output.get("output", "")).strip()
-        tool_calls = [
-            {"tool": s.tool, "input": s.tool_input, "output": str(o)[:5000]}
-            for s, o in output.get("intermediate_steps", [])
-        ]
+        text = _absorb_outcome(req, None, output)
     else:
         text = str(output).strip()
-        tool_calls = []
 
     p.text_parts = [text]
-    p.tool_calls = tool_calls
     p.prompt_tokens = collector.prompt_tokens or estimate_prompt_tokens(req, inputs)
     p.completion_tokens = collector.completion_tokens or count_tokens(text)
     p.finished = True
@@ -241,50 +353,35 @@ async def generate(db: AsyncSession, req: GenerationRequest) -> GenerationResult
     return GenerationResult(
         text=text,
         citations=citations,
-        tool_calls=tool_calls,
+        tool_calls=p.tool_runs,
+        tool_runs=p.tool_runs,
         prompt_tokens=p.prompt_tokens,
         completion_tokens=p.completion_tokens,
         embedding_tokens=p.embedding_tokens,
         latency_ms=p.latency_ms,
         model=p.model,
+        provider=p.provider,
+        approval=p.approval,
+        thread_id=req.thread_id,
+        status=p.status,
     )
 
 
-async def stream(db: AsyncSession, req: GenerationRequest) -> AsyncIterator[dict]:
-    """Streaming generation.
-
-    Yields structured events: `citations`, `token` (many), `tool_call`, `usage`, `error`,
-    and always finalizes with `done` carrying the full text, usage and latency.
-
-    Cancellation:
-    - `req.stop_event` set → the model call is cancelled and `done.interrupted` is true.
-    - consumer closed / task cancelled (client disconnect) → the model call is cancelled;
-      `req.progress` keeps the partial output so the caller can persist it.
-    - `GENERATION_TIMEOUT_SECONDS` exceeded → treated like a stop with reason `timeout`.
-    """
+async def _consume(
+    req: GenerationRequest,
+    collector: StreamCollector,
+    run: Callable[[], Awaitable[None]],
+    *,
+    operation: str,
+    inputs: dict[str, Any] | None,
+) -> AsyncIterator[dict]:
+    """Shared streaming loop: republish collector events, honor stop/timeout/disconnect,
+    then emit `done`."""
     p = req.progress
-    inputs, citations = await _prepare_inputs(db, req)
-    runnable = _build_runnable(req)
-    collector = StreamCollector()
-    config = _run_config(req, collector)
-    operation = "agent" if req.use_tools else "chat"
-
-    if citations:
-        yield {"type": "citations", "data": p.citations}
 
     async def _drive() -> None:
         try:
-            if req.use_tools:
-                result = await runnable.ainvoke(inputs, config=config)
-                final = str(result.get("output", "")).strip()
-                if final and not collector.saw_token:
-                    # Some agent runs produce the final answer without streaming it.
-                    await collector.queue.put({"type": "token", "data": final})
-            else:
-                # Tokens reach the consumer through the callback; don't also collect chunks
-                # here or the text would be counted twice.
-                async for _ in runnable.astream(inputs, config=config):
-                    pass
+            await run()
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -355,11 +452,12 @@ async def stream(db: AsyncSession, req: GenerationRequest) -> AsyncIterator[dict
 
     if p.interrupted:
         INTERRUPTED_GENERATIONS.labels(p.interrupt_reason or "unknown").inc()
-    p.prompt_tokens = p.prompt_tokens or estimate_prompt_tokens(req, inputs)
+    if inputs is not None:
+        p.prompt_tokens = p.prompt_tokens or estimate_prompt_tokens(req, inputs)
     p.completion_tokens = p.completion_tokens or count_tokens(p.text)
     p.finished = True
 
-    status = "error" if p.errored else ("interrupted" if p.interrupted else "ok")
+    status = p.status
     LLM_REQUESTS.labels(p.model, operation, status).inc()
     LLM_LATENCY.labels(p.model, operation).observe(p.latency_ms / 1000)
 
@@ -369,12 +467,85 @@ async def stream(db: AsyncSession, req: GenerationRequest) -> AsyncIterator[dict
             "text": p.text,
             "latency_ms": p.latency_ms,
             "model": p.model,
+            "provider": p.provider,
             "prompt_tokens": p.prompt_tokens,
             "completion_tokens": p.completion_tokens,
             "interrupted": p.interrupted,
             "interrupt_reason": p.interrupt_reason,
+            "status": status,
+            "thread_id": req.thread_id,
         },
     }
+
+
+async def stream(db: AsyncSession, req: GenerationRequest) -> AsyncIterator[dict]:
+    """Streaming generation.
+
+    Yields structured events: `citations`, `token` (many), `tool_call`, `usage`,
+    `approval_required`, `error`, and always finalizes with `done` carrying the full text,
+    usage, latency and status.
+
+    Cancellation:
+    - `req.stop_event` set → the model call is cancelled and `done.interrupted` is true.
+    - consumer closed / task cancelled (client disconnect) → the model call is cancelled;
+      `req.progress` keeps the partial output so the caller can persist it.
+    - `GENERATION_TIMEOUT_SECONDS` exceeded → treated like a stop with reason `timeout`.
+    """
+    resolve_spec_for(req)
+    inputs, citations = await _prepare_inputs(db, req)
+    collector = StreamCollector()
+    operation = "agent" if req.use_tools else "chat"
+
+    if citations:
+        yield {"type": "citations", "data": req.progress.citations}
+
+    async def run() -> None:
+        if req.use_tools:
+
+            async def attempt_agent() -> AgentOutcome:
+                runner = await _agent_runner(req, collector)
+                return await runner.start(initial_agent_messages(req, inputs))
+
+            outcome = await _with_fallback(req, attempt_agent, operation=operation, collector=collector)
+            final = _absorb_outcome(req, collector, outcome)
+            if req.progress.approval:
+                await collector.queue.put({"type": "approval_required", "data": req.progress.approval})
+            elif final and not collector.saw_token:
+                # Some providers deliver the final answer without streaming it.
+                await collector.queue.put({"type": "token", "data": final})
+        else:
+
+            async def attempt_chain() -> None:
+                # Tokens reach the consumer through the callback; don't also collect chunks
+                # here or the text would be counted twice.
+                async for _ in _build_chain(req).astream(inputs, config=_run_config(req, collector)):
+                    pass
+
+            await _with_fallback(req, attempt_chain, operation=operation, collector=collector)
+
+    async for evt in _consume(req, collector, run, operation=operation, inputs=inputs):
+        yield evt
+
+
+async def resume_stream(
+    db: AsyncSession, req: GenerationRequest, decision: dict[str, Any]
+) -> AsyncIterator[dict]:
+    """Continue an agent turn paused for approval. Retrieval is not re-run: the context is
+    already part of the checkpointed conversation."""
+    resolve_spec_for(req)
+    collector = StreamCollector()
+
+    async def run() -> None:
+        runner = await _agent_runner(req, collector)
+        outcome = await runner.resume(decision)
+        final = _absorb_outcome(req, collector, outcome)
+        if req.progress.approval:
+            await collector.queue.put({"type": "approval_required", "data": req.progress.approval})
+        elif final and not collector.saw_token:
+            await collector.queue.put({"type": "token", "data": final})
+
+    async for evt in _consume(req, collector, run, operation="agent", inputs=None):
+        yield evt
 
 
 async def maybe_summarize(db: AsyncSession, *, session_id: UUID) -> None:

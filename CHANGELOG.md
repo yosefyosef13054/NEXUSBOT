@@ -3,6 +3,49 @@
 All notable changes to NexusBot are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic versioning.
 
+## [1.2.0] — Phase 2: AI core
+
+Multi-provider models with real routing, a LangGraph agent with human-in-the-loop
+approvals, and a second-generation retrieval pipeline.
+
+### Added
+- **Model registry and routing.** `app/ai/providers/` holds a catalog of OpenAI,
+  Anthropic (Claude Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1), Google Gemini, Azure OpenAI
+  and Ollama models with context windows, prices and capability flags. Providers are enabled
+  by configuring their credentials; `GET /models` lists what the server can serve. A turn's
+  model resolves request → session → user default (`PATCH /auth/me {default_model}`) →
+  server default, all validated. `MODEL_FALLBACKS` retries another model when the primary
+  provider fails before any token was streamed. Claude 4.6+ models omit sampling parameters
+  the API rejects.
+- **LangGraph agent** (`app/ai/agents/`) replacing the legacy `AgentExecutor`: tool calls
+  run with timeouts and a per-turn step budget, every tool run is persisted as a `role=tool`
+  message, and tools flagged `requires_approval` (the new `fetch_url` tool, plus
+  `TOOLS_REQUIRING_APPROVAL`) pause the turn with an `approval_required` event. The user
+  resolves it with `POST /sessions/{id}/approvals/{approval_id}` (SSE continuation) or the
+  WebSocket `approval` frame; graph state lives in a Postgres checkpointer. `GET /tools`
+  describes available tools; `GET /sessions/{id}/approvals` lists pending ones.
+- **RAG 2.0.** Hybrid retrieval (pgvector cosine + Postgres full-text, reciprocal rank
+  fusion), optional LLM reranking and conversation-aware query rewriting, heading- and
+  page-aware chunking with contextual headers, structured citations (chunk id, page,
+  section, character offsets, match type), chunk viewer endpoints, URL ingestion
+  (`POST /documents/from-url`, SSRF-guarded), and **collections** (knowledge bases) with
+  per-turn / per-session scoping.
+- Full-text chat search with ranked, highlighted results.
+
+### Fixed
+- HTML documents were loaded without separators between elements (words glued
+  together), defeating keyword search; a dedicated HTML loader strips scripts and keeps
+  the page title.
+- `PATCH /sessions/{id}` ignored `model`.
+
+### Changed
+- `SendMessageResponse`/`RegenerateResponse` include `tool_messages` and `approval`;
+  message `meta` carries `provider`, `status` and `approval`.
+- Titles and summaries are generated only once a turn completes (not while it waits for
+  an approval).
+- Migration `0003_phase2_ai_core` (collections, approvals, generated `tsvector` columns,
+  `users.default_model`, LangGraph checkpoint tables).
+
 ## [1.1.0] — Phase 1: foundation
 
 Makes every feature the README advertises actually work, and hardens the core before the

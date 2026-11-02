@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import enum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, Enum, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Computed, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config import settings
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.collection import Collection
 
 
 class DocumentStatus(str, enum.Enum):
@@ -33,10 +37,19 @@ class Document(Base):
         nullable=True,
         index=True,
     )
+    # Optional grouping into a named knowledge base.
+    collection_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("collections.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # Where the bytes came from when ingested from a URL.
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(DocumentStatus, name="document_status", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
@@ -50,6 +63,7 @@ class Document(Base):
     chunks: Mapped[list[DocumentChunk]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    collection: Mapped[Collection | None] = relationship()
 
 
 class DocumentChunk(Base):
@@ -67,6 +81,11 @@ class DocumentChunk(Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(settings.OPENAI_EMBEDDING_DIM), nullable=True
     )
+    # Generated full-text column for hybrid (keyword + vector) retrieval.
+    content_tsv: Mapped[str | None] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('english', content)", persisted=True), nullable=True
+    )
+    # page, section, start_index, end_index, source
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
@@ -79,4 +98,5 @@ class DocumentChunk(Base):
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        Index("ix_document_chunks_content_tsv", "content_tsv", postgresql_using="gin"),
     )

@@ -68,6 +68,7 @@ async def patch(
         session_id=session_id,
         title=payload.title,
         system_prompt=payload.system_prompt,
+        model=payload.model,
         meta=payload.meta,
     )
     await db.commit()

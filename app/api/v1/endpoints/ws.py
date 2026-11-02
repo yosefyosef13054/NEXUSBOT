@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from typing import Any
+from typing import Any, AsyncIterator, Callable
 from uuid import UUID
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
@@ -46,6 +46,15 @@ def _error(code: str, message: str) -> dict[str, Any]:
     return {"type": "error", "data": {"code": code, "message": message}}
 
 
+def _uuid_list(value: Any) -> list[UUID] | None:
+    if value is None:
+        return None
+    try:
+        return [UUID(str(v)) for v in value]
+    except (TypeError, ValueError):
+        return None
+
+
 @router.websocket("/ws/sessions/{session_id}")
 async def chat_ws(
     websocket: WebSocket,
@@ -57,13 +66,16 @@ async def chat_ws(
 
     Client → server frames (JSON):
         { "type": "auth", "token": "<jwt>" }            first frame (or "api_key")
-        { "type": "user_message", "content": "...", "use_rag": true, "use_tools": false }
+        { "type": "user_message", "content": "...", "use_rag": true, "use_tools": false,
+          "tool_names": null, "model": null, "collection_ids": null }
+        { "type": "approval", "approval_id": "...", "decision": "approve" | "deny",
+          "tool_call_ids": null }
         { "type": "stop" }                               cancel the in-flight generation
         { "type": "ping" }
 
     Server → client frames (JSON):
-        { "type": "auth_ok" | "token" | "citations" | "tool_call" | "usage" | "done"
-                 | "assistant_message" | "error" | "pong", "data": ... }
+        { "type": "auth_ok" | "token" | "citations" | "tool_call" | "usage" | "approval_required"
+                 | "done" | "assistant_message" | "error" | "pong", "data": ... }
 
     Query-string credentials (`?token=`) are still accepted for older clients but logged
     as deprecated.
@@ -98,20 +110,11 @@ async def chat_ws(
             async with send_lock:
                 await websocket.send_json(payload)
 
-        async def _run_generation(msg: dict[str, Any], stop: asyncio.Event) -> None:
+        async def _run(
+            events_factory: Callable[[asyncio.Event], AsyncIterator[dict[str, Any]]], stop: asyncio.Event
+        ) -> None:
             try:
-                async for evt in chat_service.stream_message(
-                    db,
-                    user_id=user.id,
-                    session_id=session_id,
-                    content=str(msg.get("content") or "").strip(),
-                    use_rag=bool(msg.get("use_rag", True)),
-                    use_tools=bool(msg.get("use_tools", False)),
-                    tool_names=msg.get("tool_names"),
-                    temperature=msg.get("temperature"),
-                    max_tokens=msg.get("max_tokens"),
-                    stop_event=stop,
-                ):
+                async for evt in events_factory(stop):
                     await _send(evt)
             except AppException as e:
                 await db.rollback()
@@ -123,6 +126,40 @@ async def chat_ws(
                 await db.rollback()
                 with contextlib.suppress(Exception):
                     await _send(_error("internal_error", str(e)[:300]))
+
+        def _message_events(msg: dict[str, Any]):
+            def factory(stop: asyncio.Event):
+                return chat_service.stream_message(
+                    db,
+                    user_id=user.id,
+                    session_id=session_id,
+                    content=str(msg.get("content") or "").strip(),
+                    use_rag=bool(msg.get("use_rag", True)),
+                    use_tools=bool(msg.get("use_tools", False)),
+                    tool_names=msg.get("tool_names"),
+                    model=msg.get("model"),
+                    collection_ids=_uuid_list(msg.get("collection_ids")),
+                    user_default_model=user.default_model,
+                    temperature=msg.get("temperature"),
+                    max_tokens=msg.get("max_tokens"),
+                    stop_event=stop,
+                )
+
+            return factory
+
+        def _approval_events(msg: dict[str, Any]):
+            def factory(stop: asyncio.Event):
+                return chat_service.resolve_approval(
+                    db,
+                    user_id=user.id,
+                    session_id=session_id,
+                    approval_id=UUID(str(msg.get("approval_id"))),
+                    decision="approve" if msg.get("decision") == "approve" else "deny",
+                    tool_call_ids=msg.get("tool_call_ids"),
+                    stop_event=stop,
+                )
+
+            return factory
 
         try:
             while True:
@@ -142,15 +179,24 @@ async def chat_ws(
                 elif kind == "stop":
                     if generation is not None and not generation.done() and stop_event is not None:
                         stop_event.set()
-                elif kind == "user_message":
+                elif kind in ("user_message", "approval"):
                     if generation is not None and not generation.done():
                         await _send(_error("busy", "A generation is already in progress"))
                         continue
-                    if not str(msg.get("content") or "").strip():
-                        await _send(_error("bad_request", "Empty content"))
-                        continue
+                    if kind == "user_message":
+                        if not str(msg.get("content") or "").strip():
+                            await _send(_error("bad_request", "Empty content"))
+                            continue
+                        factory = _message_events(msg)
+                    else:
+                        try:
+                            UUID(str(msg.get("approval_id")))
+                        except ValueError:
+                            await _send(_error("bad_request", "approval_id must be a UUID"))
+                            continue
+                        factory = _approval_events(msg)
                     stop_event = asyncio.Event()
-                    generation = asyncio.create_task(_run_generation(msg, stop_event))
+                    generation = asyncio.create_task(_run(factory, stop_event))
                 else:
                     await _send(_error("bad_request", "Unknown message type"))
         except WebSocketDisconnect:

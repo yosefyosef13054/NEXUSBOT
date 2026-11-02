@@ -35,7 +35,7 @@ async def load_recent_history(
         .where(
             ChatMessage.session_id == session_id,
             ChatMessage.deleted_at.is_(None),
-            ChatMessage.role != MessageRole.SYSTEM,
+            ChatMessage.role.notin_([MessageRole.SYSTEM, MessageRole.TOOL]),
         )
         .order_by(ChatMessage.created_at.desc())
         .limit(cap)

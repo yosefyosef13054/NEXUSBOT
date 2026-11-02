@@ -24,12 +24,11 @@ logger = get_logger(__name__)
 
 
 def _chunk_meta(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Keep only what the client may see; never leak server storage paths."""
+    """Keep what the client may see (page, section, offsets); never leak server paths."""
     meta: dict[str, Any] = {}
-    if "page" in metadata:
-        meta["page"] = metadata["page"]
-    if "start_index" in metadata:
-        meta["start_index"] = metadata["start_index"]
+    for key in ("page", "section", "start_index", "end_index"):
+        if metadata.get(key) is not None:
+            meta[key] = metadata[key]
     if metadata.get("source"):
         meta["source"] = os.path.basename(str(metadata["source"]))
     return meta
@@ -67,21 +66,21 @@ async def ingest_document(session: AsyncSession, *, document_id: UUID, batch_siz
 
         # Loaders are synchronous and CPU/IO bound; keep the event loop responsive.
         docs = await asyncio.to_thread(load_file_as_documents, path)
-        chunks = split_documents(docs)
+        chunks = split_documents(docs, document_name=doc.name)
         if not chunks:
             raise ValueError("Document produced no chunks (empty or unsupported content).")
 
         await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
         await session.flush()
 
-        texts = [c.page_content for c in chunks]
-        total = len(texts)
+        embed_inputs = [c.metadata.get("embed_text") or c.page_content for c in chunks]
+        total = len(chunks)
         size = max(1, batch_size or settings.EMBEDDING_BATCH_SIZE)
         total_tokens = 0
 
         for start in range(0, total, size):
-            batch_texts = texts[start : start + size]
-            vectors = await embed_texts(batch_texts, batch_size=size)
+            batch_inputs = embed_inputs[start : start + size]
+            vectors = await embed_texts(batch_inputs, batch_size=size)
             for offset, (chunk, vector) in enumerate(
                 zip(chunks[start : start + size], vectors, strict=False)
             ):
@@ -95,8 +94,8 @@ async def ingest_document(session: AsyncSession, *, document_id: UUID, batch_siz
                         meta=_chunk_meta(chunk.metadata),
                     )
                 )
-            total_tokens += embedding_tokens(batch_texts)
-            await _set_progress(session, doc, min(start + len(batch_texts), total), total)
+            total_tokens += embedding_tokens(batch_inputs)
+            await _set_progress(session, doc, min(start + len(batch_inputs), total), total)
 
         await log_ai_usage(
             session,

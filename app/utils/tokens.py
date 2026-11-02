@@ -80,9 +80,15 @@ def pricing_table() -> dict[str, tuple[float, float]]:
 
 
 def lookup_pricing(model: str) -> tuple[float, float] | None:
-    """Exact match first, then the longest key that prefixes the model name
-    (so `gpt-4o-mini-2024-07-18` resolves to `gpt-4o-mini`)."""
+    """Catalog spec first, then the price table: exact match, then the longest key that
+    prefixes the model name (so `gpt-4o-mini-2024-07-18` resolves to `gpt-4o-mini`)."""
     table = pricing_table()
+    if model not in table:
+        from app.ai.providers.registry import get_registry
+
+        spec = get_registry().spec(model)
+        if spec is not None and (spec.input_usd_per_1m or spec.output_usd_per_1m):
+            return spec.price_per_1k
     if model in table:
         return table[model]
     best: str | None = None

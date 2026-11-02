@@ -30,6 +30,11 @@ _TEST_ENV = {
     "UPLOAD_DIR": os.path.join(tempfile.gettempdir(), "nexusbot-test-uploads"),
     "LOG_LEVEL": "WARNING",
     "EMBEDDING_BATCH_SIZE": "4",
+    "WEB_FETCH_ALLOW_PRIVATE": "true",
+    "HTTP_TRUST_ENV": "false",
+    # Fake embeddings are random per string: tests query with the exact chunk text, which
+    # only matches when no contextual header is prepended before embedding.
+    "RAG_CONTEXT_HEADERS": "false",
 }
 for _k, _v in _TEST_ENV.items():
     os.environ.setdefault(_k, _v)
@@ -43,10 +48,15 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from app.config import settings  # noqa: E402
 
 INTEGRATION_TABLES = (
+    "checkpoint_writes",
+    "checkpoint_blobs",
+    "checkpoints",
+    "approvals",
     "tool_calls",
     "ai_usage_logs",
     "document_chunks",
     "documents",
+    "collections",
     "chat_messages",
     "chat_sessions",
     "refresh_tokens",
@@ -128,8 +138,13 @@ async def _flush_redis() -> AsyncIterator[None]:
 @pytest.fixture(autouse=True)
 def _clear_fake_llm() -> None:
     from app.ai.fake import clear_scripted_responses
+    from app.ai.providers.registry import reset_registry
 
     clear_scripted_responses()
+    reset_registry()
+    yield
+    clear_scripted_responses()
+    reset_registry()
 
 
 @pytest_asyncio.fixture

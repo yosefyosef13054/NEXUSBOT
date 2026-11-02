@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
+from app.ai.agents.checkpointer import close_checkpointer
 from app.api.v1.router import api_router
 from app.cache.redis_client import close_redis, get_redis
 from app.config import settings
@@ -16,7 +17,7 @@ from app.core.logger import configure_logging, get_logger
 from app.core.metrics import metrics_response
 from app.core.middleware import RequestContextMiddleware, SelectiveGZipMiddleware
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 configure_logging()
 logger = get_logger(__name__)
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     get_redis()  # eager connect
     yield
     await background.drain()
+    await close_checkpointer()
     await close_redis()
     logger.info("app_stopped")
 

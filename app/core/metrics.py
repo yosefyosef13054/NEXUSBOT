@@ -62,6 +62,11 @@ ACTIVE_GENERATIONS = Gauge(
     "nexusbot_active_generations",
     "Generations currently streaming.",
 )
+APPROVALS = Counter(
+    "nexusbot_approvals_total",
+    "Agent approval requests by outcome (requested|approved|denied|expired).",
+    ["outcome"],
+)
 INTERRUPTED_GENERATIONS = Counter(
     "nexusbot_interrupted_generations_total",
     "Generations stopped before completion (client disconnect or stop frame).",

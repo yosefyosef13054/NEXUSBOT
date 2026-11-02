@@ -33,6 +33,14 @@
     {
       "key": "api_key_id",
       "value": ""
+    },
+    {
+      "key": "collection_id",
+      "value": ""
+    },
+    {
+      "key": "approval_id",
+      "value": ""
     }
   ],
   "auth": {
@@ -224,6 +232,41 @@
       ]
     },
     {
+      "name": "Models & Tools",
+      "item": [
+        {
+          "name": "List models",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/models"
+          }
+        },
+        {
+          "name": "List tools",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/tools"
+          }
+        },
+        {
+          "name": "Set default model",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/auth/me",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"default_model\": \"gpt-4o-mini\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "Sessions",
       "item": [
         {
@@ -375,6 +418,57 @@
               "raw": "{\n  \"query\": \"invoice\",\n  \"limit\": 20\n}"
             }
           }
+        },
+        {
+          "name": "Send message (model + collections)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Summarize the finance memo\",\n  \"use_rag\": true,\n  \"use_tools\": true,\n  \"tool_names\": [\n    \"calculator\",\n    \"fetch_url\"\n  ],\n  \"model\": \"gpt-4o-mini\",\n  \"collection_ids\": [\n    \"{{collection_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "List pending approvals",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/sessions/{{session_id}}/approvals?status=pending"
+          }
+        },
+        {
+          "name": "Decide approval (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/approvals/{{approval_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"approve\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
         }
       ]
     },
@@ -433,6 +527,57 @@
             "method": "DELETE",
             "url": "{{baseUrl}}/documents/{{document_id}}"
           }
+        },
+        {
+          "name": "Ingest from URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/documents/from-url",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com/article\",\n  \"collection_id\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Update document",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/documents/{{document_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"collection_id\": \"{{collection_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "List chunks",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/documents/{{document_id}}/chunks?page=1&page_size=50"
+          }
         }
       ]
     },
@@ -458,6 +603,76 @@
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/../../metrics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Collections",
+      "item": [
+        {
+          "name": "Create collection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/collections",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Finance\",\n  \"description\": \"Budget memos\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "List collections",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/collections"
+          }
+        },
+        {
+          "name": "Get collection",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/collections/{{collection_id}}"
+          }
+        },
+        {
+          "name": "Update collection",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/collections/{{collection_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Finance 2026\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Delete collection",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/collections/{{collection_id}}?delete_documents=false"
           }
         }
       ]

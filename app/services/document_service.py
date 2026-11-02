@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import aiofiles
@@ -13,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logger import get_logger
-from app.models.document import Document, DocumentStatus
-from app.utils.files import is_valid_docx, sha256_file_async, sniff_mime, storage_path_for
+from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.services.collection_service import ensure_collections
+from app.utils.files import is_valid_docx, safe_filename, sha256_file_async, sniff_mime, storage_path_for
+from app.utils.web import UnsafeUrlError, fetch_url_safely
 
 logger = get_logger(__name__)
 
@@ -55,27 +58,25 @@ async def _discard(path: Path) -> None:
     await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
 
 
-async def upload_document(
+async def _validate_collection(db: AsyncSession, *, user_id: UUID, collection_id: UUID | None) -> None:
+    if collection_id is not None:
+        await ensure_collections(db, user_id=user_id, ids=[collection_id])
+
+
+async def _register(
     db: AsyncSession,
     *,
     user_id: UUID,
-    file: UploadFile,
     session_id: UUID | None,
+    collection_id: UUID | None,
+    dest: Path,
+    size: int,
+    head: bytes,
+    ext: str,
+    name: str,
+    source_url: str | None = None,
 ) -> tuple[Document, bool]:
-    """Store an upload and create its Document row.
-
-    Returns `(document, created)`. `created=False` means an identical file (same SHA-256)
-    already exists for this user and scope; the caller should not enqueue ingestion.
-    The client-supplied content type is ignored — the bytes are sniffed instead.
-    """
-    ext = _extension_of(file.filename)
-    dest = storage_path_for(str(user_id), file.filename or f"upload{ext}")
-    try:
-        size, head = await _save_upload_to_disk(file, dest)
-    except Exception:
-        await _discard(dest)
-        raise
-
+    """Validate stored bytes, dedupe by hash and create the Document row."""
     if size == 0:
         await _discard(dest)
         raise ValidationError("Empty file")
@@ -106,10 +107,12 @@ async def upload_document(
     doc = Document(
         user_id=user_id,
         session_id=session_id,
-        name=file.filename or dest.name,
+        collection_id=collection_id,
+        name=name[:512],
         mime_type=mime,
         size_bytes=size,
         storage_path=str(dest),
+        source_url=source_url,
         status=DocumentStatus.PENDING,
         content_hash=digest,
         meta={"sha256": digest, "progress": 0},
@@ -120,10 +123,105 @@ async def upload_document(
     return doc, True
 
 
+async def upload_document(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    file: UploadFile,
+    session_id: UUID | None,
+    collection_id: UUID | None = None,
+) -> tuple[Document, bool]:
+    """Store an upload and create its Document row.
+
+    Returns `(document, created)`. `created=False` means an identical file (same SHA-256)
+    already exists for this user and scope; the caller should not enqueue ingestion.
+    The client-supplied content type is ignored — the bytes are sniffed instead.
+    """
+    await _validate_collection(db, user_id=user_id, collection_id=collection_id)
+    ext = _extension_of(file.filename)
+    dest = storage_path_for(str(user_id), file.filename or f"upload{ext}")
+    try:
+        size, head = await _save_upload_to_disk(file, dest)
+    except Exception:
+        await _discard(dest)
+        raise
+    return await _register(
+        db,
+        user_id=user_id,
+        session_id=session_id,
+        collection_id=collection_id,
+        dest=dest,
+        size=size,
+        head=head,
+        ext=ext,
+        name=file.filename or dest.name,
+    )
+
+
+async def ingest_from_url(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    url: str,
+    session_id: UUID | None,
+    collection_id: UUID | None = None,
+) -> tuple[Document, bool]:
+    """Download a public web page / PDF / text resource and register it like an upload."""
+    await _validate_collection(db, user_id=user_id, collection_id=collection_id)
+    try:
+        resource = await fetch_url_safely(url)
+    except UnsafeUrlError as e:
+        raise ValidationError(f"Cannot fetch URL: {e}", details={"url": url})
+    except Exception as e:  # noqa: BLE001 — network errors
+        raise ValidationError(f"Cannot fetch URL: {str(e)[:200]}", details={"url": url})
+
+    if resource.is_pdf:
+        ext = ".pdf"
+    elif resource.is_html:
+        ext = ".html"
+    elif resource.content_type == "application/json":
+        ext = ".json"
+    elif resource.content_type == "text/markdown":
+        ext = ".md"
+    else:
+        ext = ".txt"
+
+    parts = urlsplit(resource.final_url)
+    base = resource.title or Path(parts.path).name or parts.netloc or "page"
+    base = safe_filename(base.replace(" ", "_"))[:120]
+    if not base.lower().endswith(ext):
+        base = f"{base}{ext}"
+    dest = storage_path_for(str(user_id), base)
+    async with aiofiles.open(dest, "wb") as out:
+        await out.write(resource.body)
+    display_name = (resource.title or resource.final_url)[:512]
+    if not display_name.lower().endswith(ext) and not resource.title:
+        display_name = resource.final_url[:512]
+    return await _register(
+        db,
+        user_id=user_id,
+        session_id=session_id,
+        collection_id=collection_id,
+        dest=dest,
+        size=len(resource.body),
+        head=resource.body[:_SNIFF_BYTES],
+        ext=ext,
+        name=display_name,
+        source_url=resource.final_url,
+    )
+
+
 async def list_documents(
-    db: AsyncSession, *, user_id: UUID, page: int, page_size: int
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    page: int,
+    page_size: int,
+    collection_id: UUID | None = None,
 ) -> tuple[list[Document], int]:
     base = select(Document).where(Document.user_id == user_id, Document.deleted_at.is_(None))
+    if collection_id is not None:
+        base = base.where(Document.collection_id == collection_id)
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
         (
@@ -142,6 +240,56 @@ async def get_document(db: AsyncSession, *, user_id: UUID, document_id: UUID) ->
     if obj is None or obj.user_id != user_id or obj.deleted_at is not None:
         raise NotFoundError("Document not found")
     return obj
+
+
+_UNSET = object()
+
+
+async def update_document(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    document_id: UUID,
+    name: str | None = None,
+    collection_id: UUID | None | object = _UNSET,
+) -> Document:
+    obj = await get_document(db, user_id=user_id, document_id=document_id)
+    if name is not None:
+        obj.name = name.strip()[:512]
+    if collection_id is not _UNSET:
+        cid = collection_id if isinstance(collection_id, UUID) else None
+        await _validate_collection(db, user_id=user_id, collection_id=cid)
+        obj.collection_id = cid
+    await db.flush()
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+async def list_chunks(
+    db: AsyncSession, *, user_id: UUID, document_id: UUID, page: int, page_size: int
+) -> tuple[list[DocumentChunk], int]:
+    await get_document(db, user_id=user_id, document_id=document_id)
+    base = select(DocumentChunk).where(DocumentChunk.document_id == document_id)
+    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    rows = (
+        (
+            await db.execute(
+                base.order_by(DocumentChunk.chunk_index.asc()).offset((page - 1) * page_size).limit(page_size)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), int(total)
+
+
+async def get_chunk(db: AsyncSession, *, user_id: UUID, document_id: UUID, chunk_id: UUID) -> DocumentChunk:
+    await get_document(db, user_id=user_id, document_id=document_id)
+    chunk = await db.get(DocumentChunk, chunk_id)
+    if chunk is None or chunk.document_id != document_id:
+        raise NotFoundError("Chunk not found")
+    return chunk
 
 
 async def soft_delete_document(db: AsyncSession, *, user_id: UUID, document_id: UUID) -> None:

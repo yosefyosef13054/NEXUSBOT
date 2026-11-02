@@ -3,7 +3,9 @@
 Alembic env imports `register_models` so autogenerate sees every table.
 """
 
+from app.models.approval import Approval, ApprovalStatus  # noqa: F401
 from app.models.chat import ChatMessage, ChatSession, MessageRole  # noqa: F401
+from app.models.collection import Collection  # noqa: F401
 from app.models.document import Document, DocumentChunk, DocumentStatus  # noqa: F401
 from app.models.tool_call import ToolCall  # noqa: F401
 from app.models.usage import AIUsageLog  # noqa: F401

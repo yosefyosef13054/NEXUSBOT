@@ -33,8 +33,9 @@ Most "AI chatbot" repos are demos: one file, one model, no persistence, no strea
 
 - 💬 Multi-session chat with persistent history & background-generated titles
 - ⚡ Real-time token streaming over **SSE** *and* **WebSocket**, with stop/cancel that keeps the partial reply
-- 📚 RAG over user-uploaded PDFs / DOCX / TXT / MD / HTML with citations
-- 🛠 Tool calling scoped to the calling user (calculator, web search, DB tools — extensible registry)
+- 🔀 **Multi-provider models** — OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, Ollama — with per-session / per-turn / per-user routing and fallbacks
+- 🤖 **LangGraph agent** with human-in-the-loop approvals for side-effecting tools, step budgets and persisted tool messages
+- 📚 **Hybrid RAG** (vector + full-text) over PDFs / DOCX / TXT / MD / HTML / URLs with structured citations and collections
 - 🧠 Conversation memory with automatic rolling-summary compaction (off the hot path)
 - 🔐 JWT with rotating refresh tokens, revocable API keys, per-user rate limiting, account deletion
 - 📊 Provider-reported usage and cost per call, Prometheus `/metrics`, request ids everywhere
@@ -130,28 +131,35 @@ reload, migrations as a one-shot job, multiple uvicorn workers).
 <tr>
 <td valign="top">
 
-### 📚 RAG
-- File upload → async ingest via Celery, with progress %
-- PDF · DOCX · MD · HTML · TXT · CSV · JSON (sniffed, not trusted)
-- Duplicate uploads detected by SHA-256
-- pgvector with HNSW cosine index, batched embeddings
-- Retrieval skipped for users without documents
-- Inline `[doc:NAME#chunk]` citations
+### 📚 RAG 2.0
+- File upload or **URL ingestion** → async ingest via Celery, with progress %
+- PDF · DOCX · MD · HTML · TXT · CSV · JSON (sniffed, not trusted), SHA-256 dedup
+- **Hybrid retrieval**: pgvector HNSW + Postgres full-text, reciprocal rank fusion
+- Heading/page-aware chunks with contextual headers; optional LLM reranking and query rewriting
+- **Structured citations** (chunk, page, section, offsets) + chunk viewer endpoints
+- **Collections** (knowledge bases) scoping per chat or per turn
 
 </td>
 <td valign="top">
 
-### 🛠 Tool Calling
-- LangChain agent (OpenAI tools)
-- Built-in: calculator, web search, DB query
+### 🛠 Agent & Tools
+- **LangGraph** ReAct agent with Postgres checkpoints
+- Built-in: calculator, web search, fetch URL, DB query (`GET /tools`)
+- **Approvals**: side-effecting tools pause the turn until the user approves or denies
+- Every tool run persisted as a `role=tool` message + audit row; step and time budgets
 - Every tool receives a `ToolContext` — identity comes from the request, never from the model
-- Unknown tool names rejected up front (422)
-- Per-call audit log (`tool_calls` table) and `tool_call` events streamed to the client
 
 </td>
 </tr>
 <tr>
 <td valign="top">
+
+### 🔀 Models
+- `GET /models`: every provider with credentials configured
+- OpenAI · Anthropic · Google · Azure OpenAI · Ollama (local)
+- Resolution: request → session → user default → server default
+- Fallback chains, catalog prices for cost accounting
+- Capability flags (tools, vision, sampling params)
 
 ### 🧠 Memory
 - Windowed short-term history (configurable)
@@ -273,16 +281,22 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 | `POST`   | `/auth/logout`             | Revoke one refresh token |
 | `POST`   | `/auth/logout-all`         | Revoke every refresh token |
 | `GET`    | `/auth/me`                 | Current user profile |
-| `PATCH`  | `/auth/me`                 | Update profile |
+| `PATCH`  | `/auth/me`                 | Update profile / default model |
 | `POST`   | `/auth/change-password`    | Change password (signs other devices out) |
 | `DELETE` | `/auth/me`                 | Delete account (password confirmed) |
 | `POST`   | `/auth/api-keys`           | Mint API key (shown once) |
 | `DELETE` | `/auth/api-keys/{id}`      | Revoke API key |
 
+### Models & tools
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET`    | `/models`                  | Models the server can serve, with prices and capabilities |
+| `GET`    | `/tools`                   | Agent tools and whether they need approval |
+
 ### Sessions
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST`   | `/sessions`                | Create session |
+| `POST`   | `/sessions`                | Create session (validated `model`, `meta.collection_ids`) |
 | `GET`    | `/sessions`                | List (paginated) |
 | `GET`    | `/sessions/{id}`           | Get one |
 | `PATCH`  | `/sessions/{id}`           | Update title / system prompt |
@@ -294,17 +308,23 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 | `POST` | `/sessions/{id}/messages`             | Send & receive (blocking) |
 | `POST` | `/sessions/{id}/messages/stream`      | **SSE stream** |
 | `POST` | `/sessions/{id}/messages/regenerate`  | Regenerate last turn |
-| `GET`  | `/sessions/{id}/messages`             | History (cursor pagination) |
-| `POST` | `/search`                             | Search across chats |
-| `WS`   | `/ws/sessions/{id}`                   | **WebSocket stream** (auth in first frame) |
+| `GET`  | `/sessions/{id}/messages`             | History (cursor pagination, incl. tool messages) |
+| `GET`  | `/sessions/{id}/approvals`            | Pending tool approvals |
+| `POST` | `/sessions/{id}/approvals/{aid}`      | Approve / deny → **SSE continuation** |
+| `POST` | `/search`                             | Full-text search with highlights |
+| `WS`   | `/ws/sessions/{id}`                   | **WebSocket stream** (auth in first frame, `approval` frame) |
 
-### Documents (RAG)
+### Documents & collections (RAG)
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `POST`   | `/documents`            | Upload → queued ingest (dedup by content hash) |
-| `GET`    | `/documents`            | List (paginated) |
+| `POST`   | `/documents/from-url`   | Ingest a public web page / PDF (SSRF-guarded) |
+| `GET`    | `/documents`            | List (paginated, filter by collection) |
 | `GET`    | `/documents/{id}`       | Poll status + progress |
+| `PATCH`  | `/documents/{id}`       | Rename / move between collections |
+| `GET`    | `/documents/{id}/chunks`| Chunk viewer for citations |
 | `DELETE` | `/documents/{id}`       | Soft delete + remove file |
+| `POST`/`GET`/`PATCH`/`DELETE` | `/collections…` | Knowledge bases |
 
 ### Streaming wire format (identical for SSE & WS)
 
@@ -314,6 +334,7 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 { "type": "token",             "data": "Hel" }
 { "type": "token",             "data": "lo" }
 { "type": "tool_call",         "data": { "tool": "calculator", "input": "…", "phase": "end", "output": "…" } }
+{ "type": "approval_required", "data": { "approval_id": "…", "tool_calls": [ { "tool": "fetch_url", "input": {…} } ] } }
 { "type": "usage",             "data": { "prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552 } }
 { "type": "done",              "data": { "text": "Hello!", "latency_ms": 820, "interrupted": false } }
 { "type": "assistant_message", "data": { "id": "…", "content": "Hello!", "citations": [], "interrupted": false } }
@@ -347,10 +368,11 @@ The integration patterns are documented standalone in [`docs/flutter_integration
 | Layer | Choice | Why |
 |---|---|---|
 | API framework      | **FastAPI** + **Uvicorn**         | Async, fast, automatic OpenAPI |
-| AI orchestration   | **LangChain 0.3** + **LangGraph** | Runnable composition, agents, tools |
-| LLM / Embeddings   | **OpenAI** (+ fake mode)          | One file (`app/ai/llm.py`) to change |
+| AI orchestration   | **LangChain 0.3** + **LangGraph** | Runnable composition, agent graph with checkpoints |
+| LLMs               | **OpenAI · Anthropic · Google · Azure · Ollama** (+ fake mode) | Catalog + factory in `app/ai/providers/` |
+| Embeddings         | **OpenAI** (+ fake mode)          | `app/ai/llm.py` |
 | Database           | **PostgreSQL 16** + **pgvector**  | Single DB for relational + vector |
-| Vector index       | **HNSW (cosine)**                 | Sub-ms recall at scale |
+| Retrieval          | **pgvector HNSW + Postgres FTS**  | Hybrid, fused with RRF; optional reranker |
 | Cache / Broker     | **Redis 7**                       | Rate limit, cache, Celery broker |
 | Background jobs    | **Celery** + in-process tasks     | Ingestion off the hot path; titles/summaries after the reply |
 | Migrations         | **Alembic**                       | `0001_initial`, `0002_phase1_foundation` |
@@ -376,17 +398,18 @@ nexusbot/
 │  │  ├─ auth.py · sessions.py · chat.py · documents.py · ws.py · health.py
 │  │  └─ router.py
 │  ├─ ai/                    # LangChain layer
-│  │  ├─ llm.py              # Single LLM / embeddings factory (+ fake mode)
-│  │  ├─ fake.py             # Deterministic model for tests & keyless dev
-│  │  ├─ orchestrator.py     # generate() + stream() — cancellation, usage, metrics
+│  │  ├─ providers/          # Model catalog, registry (routing), factory per provider
+│  │  ├─ llm.py              # Chat/embedding factories (+ fake mode)
+│  │  ├─ fake.py             # Deterministic model (scriptable tool calls) for tests & keyless dev
+│  │  ├─ orchestrator.py     # generate() / stream() / resume_stream() — cancellation, approvals, fallbacks
 │  │  ├─ callbacks.py        # Streaming token / tool / usage collector
 │  │  ├─ prompts/            # Versioned system prompts + composer
 │  │  ├─ memory/             # Short-term window + rolling summary
 │  │  ├─ chains/             # chat · rag
-│  │  ├─ agents/             # tool_agent (OpenAI tools)
-│  │  ├─ tools/              # registry · context · calculator · web_search · db
-│  │  └─ rag/                # loader · splitter · embedder · retriever · pipeline
-│  ├─ services/              # auth · chat · sessions · documents · usage
+│  │  ├─ agents/             # LangGraph graph · runner · Postgres checkpointer
+│  │  ├─ tools/              # registry (approval flags) · context · calculator · web_search · fetch_url · db
+│  │  └─ rag/                # loader · splitter · embedder · retriever (hybrid) · rerank · query · pipeline
+│  ├─ services/              # auth · chat (approvals) · sessions · documents · collections · usage
 │  ├─ models/                # SQLAlchemy ORM (UUIDs, soft-delete)
 │  ├─ schemas/               # Pydantic request/response contracts
 │  ├─ core/                  # security · deps · exceptions · rate_limit · middleware · metrics · background · logger
@@ -418,14 +441,18 @@ Every knob lives in [`.env.example`](.env.example). The important ones:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OPENAI_API_KEY`            | —              | Required unless `AI_FAKE_MODE=true` |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `AZURE_OPENAI_*` / `OLLAMA_*` | — | Each configured provider is enabled; one is required unless `AI_FAKE_MODE=true` |
 | `AI_FAKE_MODE`              | `false`        | Deterministic in-process model + embeddings, no network |
-| `OPENAI_CHAT_MODEL`         | `gpt-4o-mini`  | Any chat completion model |
+| `DEFAULT_CHAT_MODEL`        | `OPENAI_CHAT_MODEL` | Server default; `ENABLED_MODELS` / `DISABLED_MODELS` restrict the list |
+| `MODEL_FALLBACKS`           | `{}`           | JSON `{"gpt-4o": ["claude-sonnet-5-5"]}` tried when the primary fails |
 | `OPENAI_EMBEDDING_MODEL`    | `text-embedding-3-small` | Must match `OPENAI_EMBEDDING_DIM` |
 | `MODEL_PRICING`             | `{}`           | JSON `{"model": [in_per_1k, out_per_1k]}` merged over built-in prices |
 | `JWT_SECRET_KEY`            | `change-me`    | **≥ 32 random chars; production refuses the default** |
 | `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` / `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `30` / `30` | Refresh tokens rotate on use |
 | `RAG_CHUNK_SIZE` / `_OVERLAP` / `_TOP_K` | `800` / `120` / `5` | Tune per corpus |
+| `RAG_HYBRID_SEARCH` / `RAG_RERANKER` / `RAG_QUERY_REWRITE` | `true` / `none` / `false` | Hybrid retrieval, LLM reranking, standalone-query rewriting |
+| `AGENT_MAX_STEPS` / `AGENT_MAX_TOOL_SECONDS` | `8` / `60` | Per-turn agent budgets |
+| `TOOLS_REQUIRING_APPROVAL` / `APPROVAL_TTL_MINUTES` | `[]` / `30` | Human-in-the-loop gating (`fetch_url` always requires approval) |
 | `EMBEDDING_BATCH_SIZE`      | `64`           | Chunks per embedding request during ingest |
 | `CHAT_MAX_HISTORY_MESSAGES` | `20`           | Windowed memory size |
 | `CHAT_SUMMARY_TRIGGER_TOKENS` | `3000`       | When the summarizer kicks in |
@@ -454,10 +481,12 @@ SYNC_DATABASE_URL=postgresql://chatbot:chatbot@127.0.0.1:5432/chatbot_test \
 pytest
 ```
 
-The suite runs with `AI_FAKE_MODE` so it never needs a provider key. It covers the auth lifecycle
-(rotation, reuse detection, logout, deletion), chat over REST/SSE/WebSocket, stop and disconnect
-handling (including a real uvicorn subprocess to exercise client disconnects over sockets),
-upload validation and dedup, ingestion, retrieval, metrics and middleware. CI runs the same on
+The suite runs with `AI_FAKE_MODE` so it never needs a provider key (the fake model can be
+scripted to call tools). It covers the auth lifecycle (rotation, reuse detection, logout,
+deletion), chat over REST/SSE/WebSocket, stop and disconnect handling (including a real uvicorn
+subprocess to exercise client disconnects over sockets), the agent loop with approvals and
+budgets, model routing, hybrid retrieval, collections, URL ingestion with SSRF guards, upload
+validation and dedup, metrics and middleware. CI runs the same on
 every push with Postgres and Redis service containers.
 
 ---
@@ -465,7 +494,7 @@ every push with Postgres and Redis service containers.
 ## 🛣 Roadmap
 
 - [x] **Phase 1 — foundation** (v1.1): everything above actually works, CI, metrics, account lifecycle
-- [ ] **Phase 2 — AI core**: multi-provider models (OpenAI, Anthropic, Google, Azure, Ollama) with real routing, LangGraph agent with human-in-the-loop approvals, hybrid retrieval + reranking + structured citations, knowledge-base collections
+- [x] **Phase 2 — AI core** (v1.2): multi-provider models with real routing and fallbacks, LangGraph agent with human-in-the-loop approvals and persisted tool messages, hybrid retrieval + reranking + structured citations, URL ingestion, collections
 - [ ] **Phase 3 — product layer**: workspaces & roles, assistants, quotas, feedback, admin API, user memory, conversation branching, resumable streams, eval harness
 - [ ] **Phase 4 — multimodal & mobile depth**: attachments & vision, voice, artifacts, object storage, MCP tools, offline-first client, i18n/RTL, push, release pipeline
 

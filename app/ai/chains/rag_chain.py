@@ -5,6 +5,7 @@ from langchain_core.runnables import Runnable
 
 from app.ai.llm import build_chat_llm
 from app.ai.prompts.templates import build_chat_prompt
+from app.ai.providers.catalog import ModelSpec
 
 
 def build_rag_chain(
@@ -13,8 +14,9 @@ def build_rag_chain(
     temperature: float | None = None,
     max_tokens: int | None = None,
     streaming: bool = True,
+    spec: ModelSpec | None = None,
 ) -> Runnable:
     """Retrieval-augmented chain. Inputs: { input, history, summary, context }."""
     prompt = build_chat_prompt(system_prompt=system_prompt, use_rag=True, use_tools=False)
-    llm = build_chat_llm(temperature=temperature, max_tokens=max_tokens, streaming=streaming)
+    llm = build_chat_llm(spec=spec, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
     return prompt | llm | StrOutputParser()

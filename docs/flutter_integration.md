@@ -382,3 +382,45 @@ Common codes you'll handle:
 - Keep the SSE/WS event handlers idempotent — UI re-renders shouldn't break if the same `done` arrives twice.
 - Treat `done.data.text` as authoritative over the tokens you accumulated.
 - Put the session id in the route (`/chat/:id`) so a web refresh restores the conversation.
+
+---
+
+## 9. Models, approvals and collections (Phase 2)
+
+```dart
+// Which models can this server serve? Show them in a picker; send the id on the session
+// or on a single turn (`model` in the message body / WS frame).
+final models = (await api.dio.get('/models')).data['items'] as List;
+
+// Scope a chat to one or more knowledge bases (collections).
+await api.dio.patch('/sessions/$sid', data: {'meta': {'collection_ids': [collectionId]}});
+
+// Agent approvals: a turn can pause with an `approval_required` event (and end with
+// done.status == "awaiting_approval"). Resolve it — the response streams the rest of the
+// turn exactly like /messages/stream, and the final assistant_message has the same id as
+// the placeholder you already rendered.
+final (events, cancel) = streamApproval(api, sid, approvalId, 'approve');
+
+(Stream<Map<String, dynamic>>, CancelToken) streamApproval(
+    ApiClient api, String sessionId, String approvalId, String decision) {
+  final cancel = CancelToken();
+  final events = () async* {
+    final r = await api.dio.post<ResponseBody>(
+      '/sessions/$sessionId/approvals/$approvalId',
+      data: {'decision': decision},
+      cancelToken: cancel,
+      options: Options(responseType: ResponseType.stream, headers: {'Accept': 'text/event-stream'}),
+    );
+    yield* sseFrames(r.data!.stream);
+  }();
+  return (events, cancel);
+}
+```
+
+Rendering tips:
+- `role == "tool"` history rows are tool runs (`meta.tool`, `meta.input`, `meta.status`): show
+  them as collapsible chips between the user message and the reply, not as bubbles.
+- Citations carry `page`, `section`, `start_index`/`end_index` and `chunk_id`; fetch the text
+  with `GET /documents/{document_id}/chunks/{chunk_id}` to show the source span.
+- After an app restart, `GET /sessions/{id}/approvals?status=pending` tells you which turns
+  are still waiting for a decision.

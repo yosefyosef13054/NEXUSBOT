@@ -8,8 +8,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.llm import build_chat_llm
 from app.ai.prompts.templates import TITLE_PROMPT
+from app.ai.providers.registry import get_registry
 from app.core.exceptions import NotFoundError
 from app.models.chat import ChatMessage, ChatSession, MessageRole
+from app.services.collection_service import ensure_collections
+
+
+async def _validated_meta(db: AsyncSession, *, user_id: UUID, meta: dict | None) -> dict:
+    """`meta.collection_ids` is the chat's knowledge scope; make sure the ids are the user's."""
+    meta = dict(meta or {})
+    raw = meta.get("collection_ids")
+    if raw:
+        ids = [UUID(str(x)) for x in raw]
+        await ensure_collections(db, user_id=user_id, ids=ids)
+        meta["collection_ids"] = [str(i) for i in ids]
+    return meta
 
 
 async def create_session(
@@ -25,8 +38,8 @@ async def create_session(
         user_id=user_id,
         title=title or "New chat",
         system_prompt=system_prompt,
-        model=model,
-        meta=meta or {},
+        model=get_registry().validate(model),
+        meta=await _validated_meta(db, user_id=user_id, meta=meta),
     )
     db.add(obj)
     await db.flush()
@@ -64,6 +77,7 @@ async def update_session(
     session_id: UUID,
     title: str | None = None,
     system_prompt: str | None = None,
+    model: str | None = None,
     meta: dict | None = None,
 ) -> ChatSession:
     obj = await get_session(db, user_id=user_id, session_id=session_id)
@@ -71,8 +85,11 @@ async def update_session(
         obj.title = title
     if system_prompt is not None:
         obj.system_prompt = system_prompt
+    if model is not None:
+        obj.model = get_registry().validate(model)
     if meta is not None:
-        obj.meta = {**(obj.meta or {}), **meta}
+        merged = {**(obj.meta or {}), **meta}
+        obj.meta = await _validated_meta(db, user_id=user_id, meta=merged)
     await db.flush()
     # `updated_at` is set server-side via onupdate, so it's expired after the
     # UPDATE. Refresh now (in the async context) so response serialization
@@ -85,6 +102,13 @@ async def soft_delete_session(db: AsyncSession, *, user_id: UUID, session_id: UU
     obj = await get_session(db, user_id=user_id, session_id=session_id)
     obj.deleted_at = datetime.now(UTC)
     await db.flush()
+
+
+def session_collection_ids(session: ChatSession) -> list[UUID] | None:
+    raw = (session.meta or {}).get("collection_ids")
+    if not raw:
+        return None
+    return [UUID(str(x)) for x in raw]
 
 
 async def autogenerate_title_if_needed(db: AsyncSession, *, session: ChatSession) -> None:
@@ -105,7 +129,7 @@ async def autogenerate_title_if_needed(db: AsyncSession, *, session: ChatSession
     if not first_user_msg:
         return
     try:
-        llm = build_chat_llm(streaming=False, temperature=0.2, max_tokens=24)
+        llm = build_chat_llm(model=session.model, streaming=False, temperature=0.2, max_tokens=24)
         chain = TITLE_PROMPT | llm
         result = await chain.ainvoke({"first_message": first_user_msg[:1000]})
         title = str(result.content).strip().strip('"').strip("'")[:60]

@@ -54,11 +54,31 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://redis:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://redis:6379/2"
 
-    # ---- AI ----
+    # ---- AI providers ----
+    # Any provider with credentials configured is enabled; its models show up in GET /models.
     OPENAI_API_KEY: str = ""
-    OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
+    OPENAI_CHAT_MODEL: str = "gpt-4o-mini"  # legacy name for the server default model
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     OPENAI_EMBEDDING_DIM: int = 1536
+    ANTHROPIC_API_KEY: str = ""
+    GOOGLE_API_KEY: str = ""
+    AZURE_OPENAI_API_KEY: str = ""
+    AZURE_OPENAI_ENDPOINT: str = ""
+    AZURE_OPENAI_API_VERSION: str = "2024-10-21"
+    # {"gpt-4o-mini": "my-deployment-name", ...} — which Azure deployment serves each model id.
+    AZURE_OPENAI_DEPLOYMENTS: dict[str, str] = Field(default_factory=dict)
+    OLLAMA_BASE_URL: str = ""
+    # Comma separated model names served by Ollama (e.g. "llama3.1:8b,qwen2.5:14b").
+    OLLAMA_MODELS: List[str] = Field(default_factory=list)
+    # Server default; falls back to OPENAI_CHAT_MODEL, then the first available model.
+    DEFAULT_CHAT_MODEL: str = ""
+    # Optional JSON/YAML file with extra or overriding model specs (see app/ai/providers/catalog.py).
+    MODEL_CATALOG_PATH: str = ""
+    # Restrict the exposed models (comma separated ids). Empty = every model of an enabled provider.
+    ENABLED_MODELS: List[str] = Field(default_factory=list)
+    DISABLED_MODELS: List[str] = Field(default_factory=list)
+    # {"gpt-4o": ["claude-sonnet-5-5"]}: tried in order when the primary provider fails.
+    MODEL_FALLBACKS: dict[str, list[str]] = Field(default_factory=dict)
     # Run the whole stack without any provider key: deterministic fake LLM + embeddings.
     # Used by the test-suite and for local UI development.
     AI_FAKE_MODE: bool = False
@@ -86,6 +106,31 @@ class Settings(BaseSettings):
     RAG_CHUNK_OVERLAP: int = 120
     RAG_TOP_K: int = 5
     RAG_SIMILARITY_THRESHOLD: float = 0.20
+    # Hybrid retrieval: pgvector cosine + Postgres full-text, fused with reciprocal rank fusion.
+    RAG_HYBRID_SEARCH: bool = True
+    # How many candidates each retriever contributes before fusion/reranking (× top_k).
+    RAG_CANDIDATES_MULTIPLIER: int = 4
+    # none | llm — the llm reranker scores candidates with the chat model (extra call per turn).
+    RAG_RERANKER: Literal["none", "llm"] = "none"
+    # Rewrite follow-up questions into standalone search queries using the conversation.
+    RAG_QUERY_REWRITE: bool = False
+    # Prepend "document > section" headers to chunks before embedding (improves recall).
+    RAG_CONTEXT_HEADERS: bool = True
+
+    # ---- Agent ----
+    AGENT_MAX_STEPS: int = 8
+    AGENT_MAX_TOOL_SECONDS: int = 60
+    # Tool names that need the user's approval before running (in addition to tools that
+    # declare it themselves).
+    TOOLS_REQUIRING_APPROVAL: List[str] = Field(default_factory=list)
+    APPROVAL_TTL_MINUTES: int = 30
+
+    # ---- Outbound web fetching (URL ingestion, fetch_url tool) ----
+    WEB_FETCH_MAX_BYTES: int = 5 * 1024 * 1024
+    WEB_FETCH_TIMEOUT_SECONDS: int = 20
+    # Never enable in production: lets URL fetches reach private/loopback addresses (tests).
+    WEB_FETCH_ALLOW_PRIVATE: bool = False
+    HTTP_TRUST_ENV: bool = True
 
     # ---- Chat / memory ----
     CHAT_MAX_HISTORY_MESSAGES: int = 20
@@ -127,7 +172,14 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     METRICS_ENABLED: bool = True
 
-    @field_validator("ALLOWED_ORIGINS", "ALLOWED_UPLOAD_EXTENSIONS", mode="before")
+    @field_validator(
+        "ALLOWED_ORIGINS",
+        "ALLOWED_UPLOAD_EXTENSIONS",
+        "OLLAMA_MODELS",
+        "ENABLED_MODELS",
+        "DISABLED_MODELS",
+        mode="before",
+    )
     @classmethod
     def split_csv(cls, v: Any):
         if isinstance(v, str):
@@ -139,9 +191,9 @@ class Settings(BaseSettings):
             return [o.strip() for o in s.split(",") if o.strip()]
         return v
 
-    @field_validator("MODEL_PRICING", mode="before")
+    @field_validator("MODEL_PRICING", "AZURE_OPENAI_DEPLOYMENTS", "MODEL_FALLBACKS", mode="before")
     @classmethod
-    def parse_pricing(cls, v: Any):
+    def parse_json_mapping(cls, v: Any):
         if isinstance(v, str):
             return json.loads(v) if v.strip() else {}
         return v

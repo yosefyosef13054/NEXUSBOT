@@ -216,9 +216,24 @@ async def revoke_api_key(db: AsyncSession, *, user_id: UUID, key_id: UUID) -> No
     await db.flush()
 
 
-async def update_profile(db: AsyncSession, *, user: User, full_name: str | None) -> User:
+_UNSET: object = object()
+
+
+async def update_profile(
+    db: AsyncSession,
+    *,
+    user: User,
+    full_name: str | None = None,
+    default_model: str | None | object = _UNSET,
+) -> User:
     if full_name is not None:
         user.full_name = full_name.strip() or None
+    if default_model is not _UNSET:
+        from app.ai.providers.registry import get_registry
+
+        user.default_model = get_registry().validate(
+            default_model if isinstance(default_model, str) else None
+        )
     await db.flush()
     return user
 

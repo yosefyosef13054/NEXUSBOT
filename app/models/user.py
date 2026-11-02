@@ -24,6 +24,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Preferred chat model (validated against the registry); None = server default.
+    default_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     api_keys: Mapped[list[ApiKey]] = relationship(back_populates="user", cascade="all, delete-orphan")
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(

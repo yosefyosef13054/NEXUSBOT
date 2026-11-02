@@ -102,7 +102,10 @@ async def update_me(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await auth_service.update_profile(db, user=user, full_name=payload.full_name)
+    kwargs: dict = {"full_name": payload.full_name}
+    if "default_model" in payload.model_fields_set:
+        kwargs["default_model"] = payload.default_model
+    user = await auth_service.update_profile(db, user=user, **kwargs)
     await db.commit()
     return user
 

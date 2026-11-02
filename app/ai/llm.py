@@ -6,7 +6,15 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from pydantic import SecretStr
 
+from app.ai.providers.catalog import ModelSpec
+from app.ai.providers.factory import build_chat_model
+from app.ai.providers.registry import get_registry
 from app.config import settings
+
+
+def resolve_spec(model: str | None = None, *candidates: str | None) -> ModelSpec:
+    """Resolve the model to use: explicit request → further candidates → server default."""
+    return get_registry().resolve(model, *candidates)
 
 
 def build_chat_llm(
@@ -15,40 +23,20 @@ def build_chat_llm(
     temperature: float | None = None,
     max_tokens: int | None = None,
     streaming: bool = True,
+    spec: ModelSpec | None = None,
 ) -> BaseChatModel:
-    """Factory for chat models.
+    """Factory for chat models across providers.
 
-    With `AI_FAKE_MODE=true` a deterministic in-process model is returned so the whole
-    stack runs without provider keys (tests, UI development). Otherwise OpenAI; other
-    providers plug in here (see Phase 2 provider registry).
+    `spec` wins when given; otherwise `model` is resolved through the registry (which also
+    applies `AI_FAKE_MODE`). Every chain, agent and maintenance task goes through here, so
+    adding a provider is a catalog entry plus a branch in `app/ai/providers/factory.py`.
     """
-    if settings.AI_FAKE_MODE:
-        from app.ai.fake import FakeChatModel
-
-        return FakeChatModel(delay=settings.AI_FAKE_DELAY_SECONDS)
-
-    from langchain_openai import ChatOpenAI
-
-    return ChatOpenAI(  # type: ignore[call-arg]
-        api_key=SecretStr(settings.OPENAI_API_KEY),
-        model=model or settings.OPENAI_CHAT_MODEL,
-        temperature=temperature if temperature is not None else settings.CHAT_TEMPERATURE,
-        max_tokens=max_tokens or settings.CHAT_RESPONSE_MAX_TOKENS,
-        streaming=streaming,
-        # Ask the provider to include token usage in the final streamed chunk, otherwise
-        # streamed generations report no usage at all and cost accounting is blind.
-        stream_usage=True,
-        timeout=60,
-        max_retries=2,
-    )
+    spec = spec or resolve_spec(model)
+    return build_chat_model(spec, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
 
 
 def chat_model_name(model: str | None = None) -> str:
-    if settings.AI_FAKE_MODE:
-        from app.ai.fake import FAKE_MODEL_NAME
-
-        return FAKE_MODEL_NAME
-    return model or settings.OPENAI_CHAT_MODEL
+    return resolve_spec(model).id
 
 
 @lru_cache
