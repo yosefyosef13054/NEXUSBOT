@@ -23,8 +23,14 @@ from langchain_core.messages.tool import ToolCall, ToolCallChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 _scripted: deque[str | AIMessage] = deque()
+_last_prompt: list[BaseMessage] = []
 
 FAKE_MODEL_NAME = "nexusbot-fake"
+
+
+def last_prompt() -> list[BaseMessage]:
+    """The messages of the most recent model call (tests inspect multimodal content)."""
+    return list(_last_prompt)
 
 
 def script_responses(*items: str | AIMessage) -> None:
@@ -55,7 +61,13 @@ def _text_of(message: BaseMessage) -> str:
     c = message.content
     if isinstance(c, str):
         return c
-    return " ".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in c)
+    parts = []
+    for p in c:
+        if isinstance(p, dict):
+            parts.append(p.get("text", "") if p.get("type") != "image_url" else "[image]")
+        else:
+            parts.append(str(p))
+    return " ".join(parts)
 
 
 def _approx_tokens(text: str) -> int:
@@ -82,6 +94,7 @@ class FakeChatModel(BaseChatModel):
     # ---- scripted / echo behaviour --------------------------------------------
 
     def _reply(self, messages: list[BaseMessage]) -> AIMessage:
+        _last_prompt[:] = list(messages)
         if _scripted:
             item = _scripted.popleft()
             if isinstance(item, AIMessage):

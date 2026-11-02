@@ -37,6 +37,10 @@ _TEST_ENV = {
     "RAG_CONTEXT_HEADERS": "false",
     # Memory extraction runs an extra LLM call after each turn; tests enable it explicitly.
     "MEMORY_ENABLED": "false",
+    # Phase 4: the sandbox tool and stdio MCP servers are exercised by the suite.
+    "CODE_EXECUTION_ENABLED": "true",
+    "MCP_ALLOW_STDIO": "true",
+    "PUBLIC_BASE_URL": "http://test",
 }
 for _k, _v in _TEST_ENV.items():
     os.environ.setdefault(_k, _v)
@@ -53,6 +57,10 @@ INTEGRATION_TABLES = (
     "checkpoint_writes",
     "checkpoint_blobs",
     "checkpoints",
+    "session_shares",
+    "devices",
+    "mcp_servers",
+    "attachments",
     "message_feedback",
     "memories",
     "approvals",

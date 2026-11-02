@@ -36,8 +36,9 @@ def safe_filename(name: str) -> str:
 
 
 def storage_path_for(user_id: str, name: str) -> Path:
-    """Returns an absolute on-disk path namespaced by user."""
-    root = Path(settings.UPLOAD_DIR) / user_id
+    """A scratch path for an incoming upload (validated and hashed here, then handed to
+    the storage backend, which moves or uploads it)."""
+    root = Path(settings.UPLOAD_DIR) / "tmp" / user_id
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{uuid4().hex}_{safe_filename(name)}"
 

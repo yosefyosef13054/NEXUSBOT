@@ -18,6 +18,7 @@ from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.models.organization import Membership, OrgRole
 from app.services.collection_service import ensure_collections
 from app.services.org_service import has_role
+from app.storage import get_storage, storage_key
 from app.utils.files import is_valid_docx, safe_filename, sha256_file_async, sniff_mime, storage_path_for
 from app.utils.web import UnsafeUrlError, fetch_url_safely
 
@@ -109,6 +110,9 @@ async def _register(
         logger.info("upload_deduplicated", document_id=str(existing.id), user_id=str(user_id))
         return existing, False
 
+    # The key keeps the scratch file's extension: loaders pick a parser by suffix.
+    key = storage_key("documents", str(user_id), dest.name.split("_", 1)[-1] or dest.name)
+    await get_storage().put_file(key, dest, content_type=mime)
     doc = Document(
         user_id=user_id,
         org_id=org_id,
@@ -117,7 +121,7 @@ async def _register(
         name=name[:512],
         mime_type=mime,
         size_bytes=size,
-        storage_path=str(dest),
+        storage_path=key,
         source_url=source_url,
         status=DocumentStatus.PENDING,
         content_hash=digest,
@@ -348,6 +352,6 @@ async def soft_delete_document(
     await db.commit()
     # Best effort: the row is the source of truth, the bytes are reclaimable.
     try:
-        await _discard(Path(obj.storage_path))
+        await get_storage().delete(obj.storage_path)
     except Exception:  # noqa: BLE001
         logger.warning("document_file_cleanup_failed", document_id=str(document_id))

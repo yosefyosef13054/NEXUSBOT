@@ -178,9 +178,33 @@ when nothing was streamed yet.
 
 ### `GET /tools`
 ```json
-{ "items": [ { "name": "calculator", "description": "…", "requires_approval": false },
-             { "name": "fetch_url", "description": "…", "requires_approval": true } ] }
+{ "items": [ { "name": "calculator", "description": "…", "requires_approval": false, "source": "builtin" },
+             { "name": "fetch_url", "description": "…", "requires_approval": true, "source": "builtin" },
+             { "name": "run_python", "description": "…", "requires_approval": true, "source": "builtin" },
+             { "name": "mcp:github:search_issues", "description": "…", "requires_approval": true, "source": "mcp:github" } ] }
 ```
+Built-in tools plus every tool of the active org's enabled MCP servers (see *MCP servers*).
+`run_python` only appears when `CODE_EXECUTION_ENABLED=true`.
+
+### MCP servers (Model Context Protocol)
+
+Register external tool servers per organization; their tools become `mcp:<server>:<tool>`
+names usable in `tool_names` (per turn or on assistants) and require the user's approval by
+default (`requires_approval` per server). `http` (streamable HTTP) and `sse` servers may be
+registered by org admins; `stdio` servers run a command **on the API host** and are limited to
+server administrators with `MCP_ALLOW_STDIO=true`. Secrets in `env` / `headers` are stored but
+never returned (`env_keys` / `header_keys`).
+
+| Method | Endpoint | Body / notes |
+|---|---|---|
+| `GET`    | `/mcp/servers` | servers of the active org |
+| `POST`   | `/mcp/servers` | `{name (slug), transport: stdio\|http\|sse, command?, args?, env?, url?, headers?, enabled?, requires_approval?, description?}` → **201**; **409** duplicate name |
+| `GET`/`PATCH`/`DELETE` | `/mcp/servers/{id}` | admin for changes; unknown fields → **422** |
+| `POST`   | `/mcp/servers/{id}/test` | connect + list tools: `{ok, tools: [{name, server, tool, description, input_schema, requires_approval}], error, latency_ms}` |
+| `GET`    | `/mcp/servers/{id}/tools` | cached tool list (`MCP_TOOLS_CACHE_SECONDS`) |
+
+Tool results are persisted as `role=tool` messages like built-in tools; a server that is down
+makes its tools disappear from `GET /tools` and a turn that names them fails with **422**.
 
 ---
 
@@ -283,6 +307,22 @@ conversation currently ends at — see *Branches*).
 retrieval to those collections (plus documents scoped to this session); `null` uses the
 session default (`meta.collection_ids`) or all of the user's documents.
 
+**Attachments.** `attachment_ids` binds attachments uploaded with
+`POST /sessions/{id}/attachments` to this message (see *Attachments*): images are sent to the
+model as image content (a model without vision → **422** `cannot read images` with
+`details.vision_models`, unless `VISION_FALLBACK_MODEL` is set), files are given to the model as
+extracted text and audio clips as their transcript. The user message's `meta.attachments`
+lists them.
+
+**Spoken replies.** `voice_reply: true` (with optional `voice` and `audio_format`) synthesizes
+the reply: streams emit `audio_chunk` / `audio_done` events, blocking sends attach the whole
+clip; either way `assistant_message.meta.audio = {attachment_id, url, format, chunks}`.
+**503** `voice_unavailable` when no TTS provider is configured.
+
+**Artifacts.** Files produced by tools during the turn (e.g. `run_python` output) are stored as
+`artifact` attachments: `assistant_message.meta.artifacts` and `SendMessageResponse.artifacts`
+list `{id, name, mime_type, size_bytes, url, description}`.
+
 `usage` is provider-reported where available:
 `{ "prompt_tokens", "completion_tokens", "embedding_tokens", "total_tokens" }`.
 `prompt_tokens` covers the whole prompt (system prompt, summary, retrieved context, history,
@@ -345,9 +385,14 @@ Every frame carries `generation_id`; the `user_message`, `done`, `assistant_mess
 | `tool_call` | `{ tool, input, run_id, phase: start\|end\|error, output?, error?, latency_ms? }` |
 | `usage` | cumulative `{ prompt_tokens, completion_tokens, total_tokens }` |
 | `approval_required` | the turn is parked until the user decides (see *Approvals*) |
+| `artifact` | a file a tool produced: `{ id, kind: "artifact", name, mime_type, size_bytes, url, description }` |
+| `audio_chunk` | (`voice_reply`) `{ index, text, format, mime_type, data: <base64 audio> }`, one per sentence group |
+| `audio_done` | (`voice_reply`) `{ chunks, attachment: AttachmentSummary \| null }` — the whole clip, replayable later |
 | `error` | `{ code, message }` — the stream still ends with `done` + `assistant_message` |
 | `done` | `{ text, latency_ms, model, provider, prompt_tokens, completion_tokens, interrupted, interrupt_reason, status, thread_id }` |
-| `assistant_message` | final persisted message incl. `citations`, `tool_calls`, `usage`, `model`, `interrupted`, `status`, `approval` |
+| `assistant_message` | final persisted message incl. `citations`, `tool_calls`, `usage`, `model`, `interrupted`, `status`, `approval`, `artifacts`, `audio` |
+
+`user_message.data.attachments` lists the attachments bound to the message.
 
 **Disconnects do not stop the turn.** The generation runs detached from the connection and
 every frame is written to a Redis-backed log (kept `STREAM_EVENTS_TTL_SECONDS`, 1 h). A client
@@ -436,6 +481,77 @@ back to substring matching.
 
 ---
 
+## Attachments (images, files, audio)
+
+Binaries that travel with chat messages, stored in object storage (`STORAGE_BACKEND=local|s3`).
+Upload first, then reference the ids in a send; unbound attachments can be deleted.
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `POST`   | `/sessions/{id}/attachments` — multipart `file` | **201** `AttachmentRead`; content is sniffed: PNG/JPEG/WEBP/GIF → `image` (with `width`/`height`), WAV/MP3/M4A/OGG/FLAC/WEBM → `audio` (transcribed when STT is configured), allowed document types → `file` (text extracted). `MAX_ATTACHMENT_MB` |
+| `GET`    | `/sessions/{id}/attachments` | all attachments of the session (incl. artifacts and spoken replies) |
+| `GET`    | `/sessions/{id}/attachments/{aid}` | metadata incl. `text_excerpt` |
+| `GET`    | `/sessions/{id}/attachments/{aid}/content` | the bytes (streamed, `Content-Disposition: inline`), or **307** to a presigned S3 URL (`S3_PRESIGN_SECONDS`) |
+| `DELETE` | `/sessions/{id}/attachments/{aid}` | soft delete + remove the object |
+
+```json
+{ "id": "…", "session_id": "…", "message_id": null, "kind": "image", "name": "chart.png",
+  "mime_type": "image/png", "size_bytes": 48213, "width": 1200, "height": 800,
+  "url": "/api/v1/sessions/…/attachments/…/content", "description": null,
+  "has_text": false, "text_excerpt": null, "created_at": "…" }
+```
+`kind` is `image` | `file` | `audio` | `artifact`. Images are only shown to the model on the
+turn they are attached to (history keeps the text); the model must support vision.
+
+---
+
+## Voice
+
+Speech-to-text and text-to-speech providers are chosen by `STT_PROVIDER` / `TTS_PROVIDER`
+(`auto`: OpenAI when `OPENAI_API_KEY` is set, the in-process fake in `AI_FAKE_MODE`, else
+disabled → **503** `voice_unavailable`).
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `GET`  | `/audio/voices` | `{provider, stt_available, tts_available, default_voice, default_format, voices: [{id, name}]}` |
+| `POST` | `/audio/transcriptions` — multipart `file`, `language?` | `{text, language, duration_seconds, provider}` |
+| `POST` | `/audio/speech` `{text, voice?, format?}` | streams audio bytes (`audio/mpeg`, `audio/wav`, …) |
+| `POST` | `/sessions/{id}/messages/voice` — multipart `file`, `use_rag?`, `use_tools?`, `model?`, `reply_audio?` (default true), `voice?`, `audio_format?`, `language?` | one voice-mode round trip: transcribe → start a background turn with the clip attached (`audio` attachment, transcript as the message text) → **202** `{generation_id, transcript, user_message_id, attachment_id}`; attach with the generation events endpoint, where `audio_chunk` frames arrive before `assistant_message`; a push notification is sent when the reply is ready |
+
+Any send (`/messages`, `/stream`, `/background`, edits, WebSocket `user_message`) accepts
+`voice_reply`, `voice` and `audio_format` to speak the reply.
+
+---
+
+## Export & sharing
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `GET`    | `/sessions/{id}/export?format=markdown\|json&include_tools=true` | download of the active branch (`Content-Disposition: attachment`) |
+| `POST`   | `/sessions/{id}/share` `{expires_in_hours?}` | **201** `{id, token, url, expires_at, views}` — the token is shown once (`SHARE_LINK_DEFAULT_HOURS`, `PUBLIC_BASE_URL`) |
+| `GET`    | `/sessions/{id}/share` | active links (without tokens) with view counts |
+| `DELETE` | `/sessions/{id}/share?share_id=` | revoke one or all links |
+| `GET`    | `/shared/{token}` · `/shared/{token}/markdown` | **public, no auth**: `{session: {title, …}, messages: [{role, content, created_at, citations, attachments, artifacts}], expires_at}` (user/assistant turns only); rate limited per IP; **404** when revoked or expired |
+
+---
+
+## Push notifications
+
+Register device tokens; turns started with `/messages/background` or `/messages/voice` send a
+`Reply ready` notification with `data = {type: "generation_done", session_id, generation_id}`
+when the reply is persisted. Delivery goes through `PUSH_PROVIDER` (`webhook`: a signed
+`POST` of `{user_id, devices: [{platform, token}], notification: {title, body}, data}` to
+`PUSH_WEBHOOK_URL` with `X-Push-Signature: sha256=<hmac>` — bridge it to FCM / APNs / OneSignal;
+`none` disables delivery but keeps registrations).
+
+| Method | Endpoint | Body |
+|---|---|---|
+| `POST`   | `/devices` | `{platform: ios\|android\|web, token, app_version?, locale?}` → **201** (upsert per platform+token) |
+| `GET`    | `/devices` | `{items: [{id, platform, token_suffix, app_version, locale, last_seen_at, created_at}], push_enabled}` |
+| `DELETE` | `/devices/{token}` | |
+
+---
+
 ## Documents (RAG)
 
 ### `POST /documents` — multipart
@@ -512,7 +628,8 @@ Client → server:
 ```json
 {"type":"user_message","content":"hi","use_rag":true,"use_tools":false,"tool_names":null,
  "model":null,"collection_ids":null,"temperature":null,"max_tokens":null,
- "edit_of":"<user message id>"?,"idempotency_key":"<uuid>"?}
+ "edit_of":"<user message id>"?,"idempotency_key":"<uuid>"?,
+ "attachment_ids":["…"]?,"voice_reply":false,"voice":null,"audio_format":null}
 {"type":"approval","approval_id":"…","decision":"approve","tool_call_ids":null}
 {"type":"regenerate","temperature":null,"max_tokens":null}
 {"type":"stop","generation_id":"…"?}
@@ -555,4 +672,11 @@ with a `Retry-After` header.
   route, model requests/tokens/cost, tool calls, retrievals, ingestions, active and interrupted
   generations. Disable with `METRICS_ENABLED=false`.
 - `AI_FAKE_MODE=true` runs the whole API with a deterministic in-process model and embeddings
-  (no provider key) — used by the test-suite and handy for UI development.
+  (no provider key) — used by the test-suite and handy for UI development; it also provides
+  fake speech (scriptable transcripts, a tone as speech) and a vision-capable fake model.
+- `STORAGE_BACKEND=s3` (with `S3_BUCKET`, `S3_ENDPOINT_URL` for MinIO/R2, keys, region) moves
+  uploads, attachments and artifacts to object storage so API and workers can run on
+  different hosts; `local` keeps everything under `UPLOAD_DIR`.
+- `CODE_EXECUTION_ENABLED=true` turns on the `run_python` tool (subprocess with CPU / memory /
+  file-size limits, approval required). It is not a sandbox against a hostile model on a shared
+  host — enable it only in disposable containers.

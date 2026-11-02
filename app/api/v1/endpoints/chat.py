@@ -128,6 +128,10 @@ async def send_message(
         scope=TurnScope.from_principal(principal),
         explicit=_explicit(payload),
         idempotency_key=idempotency_key,
+        attachment_ids=payload.attachment_ids,
+        voice_reply=payload.voice_reply,
+        voice=payload.voice,
+        audio_format=payload.audio_format,
     )
     return SendMessageResponse(
         user_message=MessageRead.model_validate(result["user_message"]),
@@ -137,6 +141,7 @@ async def send_message(
         tool_calls=result["tool_calls"],
         usage=result["usage"],
         approval=result["approval"],
+        artifacts=result.get("artifacts", []),
     )
 
 
@@ -179,6 +184,10 @@ async def stream_message(
             scope=scope,
             explicit=explicit,
             idempotency_key=idempotency_key,
+            attachment_ids=payload.attachment_ids,
+            voice_reply=payload.voice_reply,
+            voice=payload.voice,
+            audio_format=payload.audio_format,
         )
 
     return _sse(_events, session_id=session_id)
@@ -218,6 +227,11 @@ async def send_message_background(
         explicit=_explicit(payload),
         request_id=request_id_of(request),
         idempotency_key=idempotency_key,
+        attachment_ids=payload.attachment_ids,
+        voice_reply=payload.voice_reply,
+        voice=payload.voice,
+        audio_format=payload.audio_format,
+        notify=True,
     )
     if handle.user_message is None:
         # Replayed idempotent request whose user message has since been deleted.
@@ -334,6 +348,10 @@ async def edit_message(
             explicit=explicit,
             request_id=request_id,
             idempotency_key=idempotency_key,
+            attachment_ids=payload.attachment_ids,
+            voice_reply=payload.voice_reply,
+            voice=payload.voice,
+            audio_format=payload.audio_format,
         )
 
     return _sse(_events, session_id=session_id)

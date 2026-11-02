@@ -3,6 +3,52 @@
 All notable changes to NexusBot are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic versioning.
 
+## [1.4.0] — Phase 4: multimodal and mobile depth
+
+Images, files and voice on chat messages, files back out of tools, an open tool ecosystem
+through MCP, and the plumbing a mobile client needs (object storage, share links, push).
+
+### Added
+- **Object storage layer** (`app/storage/`): uploads, attachments and artifacts are addressed
+  by key on local disk or any S3-compatible bucket (`STORAGE_BACKEND=s3`, MinIO / R2 via
+  `S3_ENDPOINT_URL`), with presigned downloads; API and workers no longer need a shared volume.
+- **Attachments** (`/sessions/{id}/attachments`): sniffed images (dimensions parsed without
+  Pillow), audio (transcribed on upload when STT is configured) and documents (text
+  extracted); bound to a message with `attachment_ids`. Images reach vision-capable models as
+  image content (`VISION_FALLBACK_MODEL` or **422** otherwise); files and transcripts are given
+  to the model inline — "chat with a file" without indexing.
+- **Voice**: `POST /audio/transcriptions`, `POST /audio/speech` (streamed), `GET /audio/voices`,
+  and `POST /sessions/{id}/messages/voice` (transcribe → background turn → spoken reply).
+  `voice_reply` on any send streams `audio_chunk` / `audio_done` events (sentence-sized) and
+  stores the clip as an audio attachment (`meta.audio`). OpenAI providers, an in-process fake
+  for tests, or disabled (**503** `voice_unavailable`).
+- **Artifacts**: tools can emit files through the `ToolContext` artifact sink; they are stored
+  as `artifact` attachments, streamed as `artifact` events and listed in
+  `assistant_message.meta.artifacts`. New `run_python` tool: model-written Python in a
+  resource-limited subprocess (CPU, memory, file size, timeout), approval required, off by
+  default (`CODE_EXECUTION_ENABLED`); files under `./output/` become artifacts.
+- **MCP client** (`/mcp/servers`): register Model Context Protocol servers per organization
+  (streamable HTTP, SSE, or stdio for server admins with `MCP_ALLOW_STDIO`); their tools are
+  discovered (cached), listed by `GET /tools` as `mcp:<server>:<tool>`, usable per turn and on
+  assistants, approval-gated per server, and executed through the agent like built-in tools.
+  Secrets in `env` / `headers` are never returned.
+- **Export and share links**: `GET /sessions/{id}/export?format=markdown|json`,
+  `POST /sessions/{id}/share` (hashed, expiring, revocable tokens) and the public
+  `GET /shared/{token}` (+ `/markdown`) transcript view.
+- **Push notifications**: `/devices` token registry and a signed-webhook provider
+  (`PUSH_PROVIDER=webhook`) that bridges to FCM / APNs / OneSignal; background and voice turns
+  notify when the reply is ready.
+- The fake model understands image content parts and exposes the last prompt for tests;
+  migration `0005` adds `attachments`, `mcp_servers`, `devices`, `session_shares`.
+
+### Changed
+- The chat prompt's user turn is a message placeholder (`input_messages`) instead of a
+  `{input}` string so multimodal content can be passed; `build_chat_prompt` callers pass
+  `input_messages=[HumanMessage(...)]`.
+- `Document.storage_path` holds a storage key (legacy absolute paths still resolve on the
+  local backend); temporary uploads go to `UPLOAD_DIR/tmp`.
+- `ToolContext` carries `org_id` and the artifact sink; `GET /tools` reports a `source`.
+
 ## [1.3.0] — Phase 3: product layer
 
 Workspaces, personas, budgets, feedback, long-term memory, conversation branching and

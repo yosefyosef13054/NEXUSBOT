@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +17,7 @@ from app.core.logger import get_logger
 from app.core.metrics import INGEST_DOCUMENTS
 from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.services.usage_service import log_ai_usage
+from app.storage import get_storage
 from app.utils.tokens import count_tokens
 
 logger = get_logger(__name__)
@@ -60,12 +60,11 @@ async def ingest_document(session: AsyncSession, *, document_id: UUID, batch_siz
     await session.commit()
 
     try:
-        path = Path(doc.storage_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Storage path missing: {path}")
-
-        # Loaders are synchronous and CPU/IO bound; keep the event loop responsive.
-        docs = await asyncio.to_thread(load_file_as_documents, path)
+        async with get_storage().local_path(doc.storage_path) as path:
+            if not path.exists():
+                raise FileNotFoundError(f"Storage path missing: {doc.storage_path}")
+            # Loaders are synchronous and CPU/IO bound; keep the event loop responsive.
+            docs = await asyncio.to_thread(load_file_as_documents, path)
         chunks = split_documents(docs, document_name=doc.name)
         if not chunks:
             raise ValueError("Document produced no chunks (empty or unsupported content).")

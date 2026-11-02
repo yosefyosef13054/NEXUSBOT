@@ -10,6 +10,7 @@ from app.ai.tools.calculator import CalculatorTool
 from app.ai.tools.context import ToolContext
 from app.ai.tools.database_query import UserSessionsTool
 from app.ai.tools.fetch_url import FetchUrlTool
+from app.ai.tools.python_sandbox import PythonSandboxTool
 from app.ai.tools.web_search import WebSearchTool
 from app.config import settings
 
@@ -34,6 +35,8 @@ class ToolInfo:
     factory: ToolFactory
     # Side-effecting or outbound tools stop the agent and ask the user before running.
     requires_approval: bool = False
+    # Feature-flagged tools disappear from the registry when their switch is off.
+    enabled: Callable[[], bool] = lambda: True
 
 
 _TOOLS: dict[str, ToolInfo] = {
@@ -58,13 +61,24 @@ _TOOLS: dict[str, ToolInfo] = {
         description=UserSessionsTool(ctx=ToolContext(user_id=UUID(int=0))).description,
         factory=lambda ctx: UserSessionsTool(ctx=_needs_context("list_user_sessions")(ctx)),
     ),
+    "run_python": ToolInfo(
+        name="run_python",
+        description=PythonSandboxTool(ctx=ToolContext(user_id=UUID(int=0))).description,
+        factory=lambda ctx: PythonSandboxTool(ctx=_needs_context("run_python")(ctx)),
+        requires_approval=True,
+        enabled=lambda: settings.CODE_EXECUTION_ENABLED,
+    ),
 }
 
 DEFAULT_TOOL_NAMES: tuple[str, ...] = ("calculator", "web_search")
 
 
+def _enabled() -> dict[str, ToolInfo]:
+    return {name: t for name, t in _TOOLS.items() if t.enabled()}
+
+
 def list_tool_names() -> list[str]:
-    return list(_TOOLS.keys())
+    return list(_enabled().keys())
 
 
 def list_tools() -> list[ToolInfo]:
@@ -74,8 +88,9 @@ def list_tools() -> list[ToolInfo]:
             description=t.description,
             factory=t.factory,
             requires_approval=requires_approval(t.name),
+            enabled=t.enabled,
         )
-        for t in _TOOLS.values()
+        for t in _enabled().values()
     ]
 
 
@@ -86,8 +101,15 @@ def requires_approval(name: str) -> bool:
     return info.requires_approval or name in set(settings.TOOLS_REQUIRING_APPROVAL)
 
 
+def is_external(name: str) -> bool:
+    """Tools served by MCP servers are namespaced `mcp:<server>:<tool>`."""
+    return name.startswith("mcp:")
+
+
 def unknown_tool_names(names: list[str] | None) -> list[str]:
-    return [n for n in (names or []) if n not in _TOOLS]
+    """Built-in names that do not exist (external `mcp:` names are validated per org)."""
+    enabled = _enabled()
+    return [n for n in (names or []) if not is_external(n) and n not in enabled]
 
 
 def get_tools(names: list[str] | None = None, ctx: ToolContext | None = None) -> list[BaseTool]:
@@ -97,7 +119,8 @@ def get_tools(names: list[str] | None = None, ctx: ToolContext | None = None) ->
     are ignored here; the API layer rejects them up front with a 422.
     """
     selected = names or list(DEFAULT_TOOL_NAMES)
-    return [_TOOLS[n].factory(ctx) for n in selected if n in _TOOLS]
+    enabled = _enabled()
+    return [enabled[n].factory(ctx) for n in selected if n in enabled]
 
 
 def register_tool(info: ToolInfo) -> None:

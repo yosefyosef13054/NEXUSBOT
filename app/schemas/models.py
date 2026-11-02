@@ -27,6 +27,8 @@ class ToolRead(BaseModel):
     name: str
     description: str
     requires_approval: bool
+    # "builtin" or "mcp:<server>" for tools served by a Model Context Protocol server.
+    source: str = "builtin"
 
 
 class ToolListResponse(BaseModel):

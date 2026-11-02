@@ -65,6 +65,18 @@
     {
       "key": "generation_id",
       "value": ""
+    },
+    {
+      "key": "attachment_id",
+      "value": ""
+    },
+    {
+      "key": "mcp_server_id",
+      "value": ""
+    },
+    {
+      "key": "share_token",
+      "value": ""
     }
   ],
   "auth": {
@@ -1204,6 +1216,395 @@
               "mode": "raw",
               "raw": "{\n  \"content\": \"hello\",\n  \"use_rag\": false\n}"
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attachments & Vision",
+      "item": [
+        {
+          "name": "Upload attachment (image / file / audio)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/attachments",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List attachments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/attachments"
+          }
+        },
+        {
+          "name": "Attachment metadata",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/attachments/{{attachment_id}}"
+          }
+        },
+        {
+          "name": "Attachment bytes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/attachments/{{attachment_id}}/content"
+          }
+        },
+        {
+          "name": "Send message with attachments",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"What is in this picture?\",\n  \"use_rag\": false,\n  \"attachment_ids\": [\n    \"{{attachment_id}}\"\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete attachment",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/attachments/{{attachment_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Voice",
+      "item": [
+        {
+          "name": "Voice capabilities",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/audio/voices"
+          }
+        },
+        {
+          "name": "Transcribe audio",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/audio/transcriptions",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "language",
+                  "value": "en",
+                  "type": "text"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Text to speech",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/audio/speech",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Hello from NexusBot\",\n  \"voice\": null,\n  \"format\": null\n}"
+            }
+          }
+        },
+        {
+          "name": "Voice turn (transcribe → background turn → spoken reply)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/voice",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "use_rag",
+                  "value": "false",
+                  "type": "text"
+                },
+                {
+                  "key": "reply_audio",
+                  "value": "true",
+                  "type": "text"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Stream with spoken reply",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/stream",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Tell me a short joke.\",\n  \"use_rag\": false,\n  \"voice_reply\": true\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "MCP servers",
+      "item": [
+        {
+          "name": "List MCP servers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/mcp/servers"
+          }
+        },
+        {
+          "name": "Register HTTP MCP server",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/mcp/servers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"github\",\n  \"transport\": \"http\",\n  \"url\": \"https://mcp.example.com/mcp\",\n  \"headers\": {\n    \"Authorization\": \"Bearer \\u2026\"\n  },\n  \"requires_approval\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "Test server (list tools)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/mcp/servers/{{mcp_server_id}}/test"
+          }
+        },
+        {
+          "name": "Server tools",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/mcp/servers/{{mcp_server_id}}/tools"
+          }
+        },
+        {
+          "name": "Use an MCP tool in a turn",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Search issues about login\",\n  \"use_rag\": false,\n  \"use_tools\": true,\n  \"tool_names\": [\n    \"mcp:github:search_issues\"\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Disable server",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/mcp/servers/{{mcp_server_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete server",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/mcp/servers/{{mcp_server_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Export, Share & Push",
+      "item": [
+        {
+          "name": "Export as Markdown",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/export?format=markdown"
+          }
+        },
+        {
+          "name": "Export as JSON",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/export?format=json"
+          }
+        },
+        {
+          "name": "Create share link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/share",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"expires_in_hours\": 168\n}"
+            }
+          }
+        },
+        {
+          "name": "List share links",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/share"
+          }
+        },
+        {
+          "name": "Revoke share links",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/share"
+          }
+        },
+        {
+          "name": "View shared transcript (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/shared/{{share_token}}"
+          }
+        },
+        {
+          "name": "Register push device",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/devices",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"platform\": \"android\",\n  \"token\": \"fcm-token\",\n  \"app_version\": \"1.4.0\"\n}"
+            }
+          }
+        },
+        {
+          "name": "List devices",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/devices"
+          }
+        },
+        {
+          "name": "Remove device",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/devices/fcm-token"
           }
         }
       ]

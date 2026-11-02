@@ -134,6 +134,12 @@ reload, migrations as a one-shot job, multiple uvicorn workers).
 <tr>
 <td valign="top">
 
+### 🖼 Multimodal
+- **Attachments** on messages: images for vision models, files as inline text, audio transcribed
+- **Voice mode**: speech-to-text in, sentence-streamed text-to-speech out (`audio_chunk` events)
+- **Artifacts**: files produced by tools (e.g. `run_python`) come back as download cards
+- Object storage (local or any S3-compatible bucket), export to Markdown/JSON, public share links, push notifications
+
 ### 📚 RAG 2.0
 - File upload or **URL ingestion** → async ingest via Celery, with progress %
 - PDF · DOCX · MD · HTML · TXT · CSV · JSON (sniffed, not trusted), SHA-256 dedup
@@ -146,6 +152,8 @@ reload, migrations as a one-shot job, multiple uvicorn workers).
 <td valign="top">
 
 ### 🛠 Agent & Tools
+- **MCP client**: register Model Context Protocol servers per org; their tools join the agent as `mcp:<server>:<tool>`
+- `run_python` sandbox tool (resource-limited subprocess, approval-gated, artifacts from `./output/`)
 - **LangGraph** ReAct agent with Postgres checkpoints
 - Built-in: calculator, web search, fetch URL, DB query (`GET /tools`)
 - **Approvals**: side-effecting tools pause the turn until the user approves or denies
@@ -309,7 +317,18 @@ All resources live in the active org, chosen per request with `X-Org-Id` (defaul
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET`    | `/models`                  | Models the server can serve, with prices and capabilities |
-| `GET`    | `/tools`                   | Agent tools and whether they need approval |
+| `GET`    | `/tools`                   | Built-in + MCP tools of the org, with approval flags |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/mcp/servers…` · `POST /mcp/servers/{id}/test` | MCP server registry per org |
+
+### Attachments, voice, sharing & push
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST`/`GET`/`DELETE` | `/sessions/{id}/attachments…` · `…/{aid}/content` | Images, files, audio; bytes or presigned S3 redirect |
+| `GET`/`POST` | `/audio/voices` · `/audio/transcriptions` · `/audio/speech` | STT / TTS |
+| `POST` | `/sessions/{id}/messages/voice`   | Voice-mode round trip (transcribe → background turn → spoken reply) |
+| `GET`  | `/sessions/{id}/export?format=markdown\|json` | Transcript export |
+| `POST`/`GET`/`DELETE` | `/sessions/{id}/share` · `GET /shared/{token}` | Public read-only links |
+| `POST`/`GET`/`DELETE` | `/devices…`             | Push tokens (webhook bridge to FCM/APNs) |
 
 ### Sessions
 | Method | Endpoint | Purpose |
@@ -323,7 +342,7 @@ All resources live in the active org, chosen per request with `X-Org-Id` (defaul
 ### Chat
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/sessions/{id}/messages`             | Send & receive (blocking, `Idempotency-Key`) |
+| `POST` | `/sessions/{id}/messages`             | Send & receive (blocking, `Idempotency-Key`, `attachment_ids`, `voice_reply`) |
 | `POST` | `/sessions/{id}/messages/stream`      | **SSE stream** (`id:` sequence numbers) |
 | `POST` | `/sessions/{id}/messages/background`  | Start a turn, **202**, attach later |
 | `GET`  | `/sessions/{id}/generations/{gid}/events` | Replay / follow a generation (`after`, `Last-Event-ID`) |
@@ -360,6 +379,8 @@ All resources live in the active org, chosen per request with `X-Org-Id` (defaul
 { "type": "token",             "data": "lo" }
 { "type": "tool_call",         "data": { "tool": "calculator", "input": "…", "phase": "end", "output": "…" } }
 { "type": "approval_required", "data": { "approval_id": "…", "tool_calls": [ { "tool": "fetch_url", "input": {…} } ] } }
+{ "type": "artifact",          "data": { "id": "…", "name": "chart.png", "mime_type": "image/png", "url": "…" } }
+{ "type": "audio_chunk",       "data": { "index": 0, "text": "Hello!", "format": "mp3", "data": "<base64>" } }
 { "type": "usage",             "data": { "prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552 } }
 { "type": "done",              "data": { "text": "Hello!", "latency_ms": 820, "interrupted": false } }
 { "type": "assistant_message", "data": { "id": "…", "content": "Hello!", "citations": [], "interrupted": false, "memories_used": [] } }
@@ -376,8 +397,9 @@ Errors: `{ "error": { "code", "message", "details" }, "request_id": "…" }` plu
 The official cross-platform client lives in its own repository:
 [**yosefyosef13054/NEXUSBOT-APP**](https://github.com/yosefyosef13054/NEXUSBOT-APP) — Riverpod,
 go_router with real `/chat/:id` routes, Dio with single-flight token refresh, SSE and WebSocket
-streaming with stop, document upload with progress, account management, and a crimson theme
-that matches the backend.
+streaming with stop and resume, attachments and voice mode, workspaces, assistants, memory,
+branching, offline cache, localization (incl. RTL), document upload with progress, account
+management, and a crimson theme that matches the backend.
 
 ```bash
 git clone https://github.com/yosefyosef13054/NEXUSBOT-APP.git
@@ -423,6 +445,7 @@ nexusbot/
 ├─ app/
 │  ├─ api/v1/endpoints/      # REST + SSE + WebSocket routes
 │  │  ├─ auth.py · orgs.py · usage.py · admin.py · assistants.py · memories.py
+│  │  ├─ attachments.py · audio.py (STT/TTS, voice turns) · mcp.py · share.py · devices.py
 │  │  ├─ sessions.py · chat.py (messages, branches, generations, feedback) · documents.py · collections.py
 │  │  ├─ ws.py · health.py · models.py
 │  │  └─ router.py
@@ -436,9 +459,14 @@ nexusbot/
 │  │  ├─ memory/             # Short-term window + rolling summary
 │  │  ├─ chains/             # chat · rag
 │  │  ├─ agents/             # LangGraph graph · runner · Postgres checkpointer
-│  │  ├─ tools/              # registry (approval flags) · context · calculator · web_search · fetch_url · db
+│  │  ├─ tools/              # registry (approval flags) · context · calculator · web_search · fetch_url · db · python_sandbox
+│  │  ├─ mcp/                # Model Context Protocol client + LangChain adapter
+│  │  ├─ voice/              # stt · tts (OpenAI or fake)
+│  │  ├─ attachments.py      # text + images → model content parts
+│  │  ├─ artifacts.py        # tool-produced files → storage + `artifact` events
 │  │  └─ rag/                # loader · splitter · embedder · retriever (hybrid) · rerank · query · pipeline
-│  ├─ services/              # auth · org · quota · assistant · memory · feedback · chat (tree, generation jobs, approvals) · sessions · documents · collections · usage
+│  ├─ services/              # auth · org · quota · assistant · memory · feedback · chat (tree, generation jobs, approvals, voice) · attachments · mcp · share · push · sessions · documents · collections · usage
+│  ├─ storage/               # local disk or S3-compatible object storage (keys, not paths)
 │  ├─ models/                # SQLAlchemy ORM (UUIDs, soft-delete)
 │  ├─ schemas/               # Pydantic request/response contracts
 │  ├─ core/                  # security · deps (Principal) · exceptions · rate_limit · streams (generation log) · idempotency · middleware · metrics · background · logger
@@ -491,6 +519,13 @@ Every knob lives in [`.env.example`](.env.example). The important ones:
 | `QUOTA_CACHE_SECONDS`       | `30`           | Month-to-date usage cache for org budgets |
 | `STREAM_EVENTS_TTL_SECONDS` | `3600`         | How long a generation can be resumed after a disconnect |
 | `IDEMPOTENCY_TTL_SECONDS`   | `86400`        | Lifetime of `Idempotency-Key` results |
+| `STORAGE_BACKEND` / `S3_BUCKET` / `S3_ENDPOINT_URL` | `local` | Object storage for uploads, attachments, artifacts |
+| `MAX_ATTACHMENT_MB` / `VISION_FALLBACK_MODEL` | `20` / — | Attachment cap; model used when the chosen one cannot see images |
+| `STT_PROVIDER` / `TTS_PROVIDER` / `TTS_VOICE` / `TTS_FORMAT` | `auto` / `auto` / `alloy` / `mp3` | Voice providers (OpenAI, fake, none) |
+| `CODE_EXECUTION_ENABLED`    | `false`        | `run_python` tool (approval-gated, resource-limited subprocess) |
+| `MCP_ENABLED` / `MCP_ALLOW_STDIO` | `true` / `false` | MCP servers; stdio transport only for server admins when allowed |
+| `PUBLIC_BASE_URL` / `SHARE_LINK_DEFAULT_HOURS` | — / `168` | Share links |
+| `PUSH_PROVIDER` / `PUSH_WEBHOOK_URL` / `PUSH_WEBHOOK_SECRET` | `none` | Push delivery (signed webhook bridge) |
 | `RATE_LIMIT_PER_MINUTE`     | `60`           | Per user (chat, uploads) |
 | `AUTH_RATE_LIMIT_PER_MINUTE`| `10`           | Per IP (register, login) |
 | `MAX_UPLOAD_MB`             | `25`           | Upload guard |
@@ -522,7 +557,9 @@ subprocess to exercise client disconnects over sockets), the agent loop with app
 budgets, model routing, hybrid retrieval, collections, URL ingestion with SSRF guards, upload
 validation and dedup, workspaces and roles, quotas, assistants, feedback, memory recall and
 extraction, branching, background / resumable generations, idempotency keys, the eval
-harness, metrics and middleware. CI runs the same on every push with Postgres and Redis
+harness, attachments and vision inputs, the `run_python` sandbox and artifacts, voice turns with
+spoken replies, MCP servers (a real stdio server from the suite), export / share links, push
+devices, local and S3 storage backends, metrics and middleware. CI runs the same on every push with Postgres and Redis
 service containers.
 
 ### Evals
@@ -541,7 +578,7 @@ Datasets are JSONL cases graded with deterministic checks or an LLM judge; see
 - [x] **Phase 1 — foundation** (v1.1): everything above actually works, CI, metrics, account lifecycle
 - [x] **Phase 2 — AI core** (v1.2): multi-provider models with real routing and fallbacks, LangGraph agent with human-in-the-loop approvals and persisted tool messages, hybrid retrieval + reranking + structured citations, URL ingestion, collections
 - [x] **Phase 3 — product layer** (v1.3): workspaces & roles, assistants, quotas, feedback, admin API, user memory, conversation branching, resumable streams, eval harness
-- [ ] **Phase 4 — multimodal & mobile depth**: attachments & vision, voice, artifacts, object storage, MCP tools, offline-first client, i18n/RTL, push, release pipeline
+- [x] **Phase 4 — multimodal & mobile depth** (v1.4): attachments & vision, voice, artifacts, object storage, MCP tools, export & share links, push notifications; Flutter: attachment composer, voice mode, artifact cards, offline cache, i18n/RTL, share intake, release pipeline
 
 PRs welcome.
 

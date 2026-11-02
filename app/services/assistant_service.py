@@ -26,6 +26,10 @@ async def _validate(
 ) -> None:
     get_registry().validate(model)
     unknown = unknown_tool_names(tool_names)
+    if not unknown:
+        from app.services import mcp_service
+
+        _, unknown = await mcp_service.resolve_tool_names(db, org_id=org_id, names=list(tool_names or []))
     if unknown:
         raise ValidationError("Unknown tools", details={"unknown": unknown, "available": list_tool_names()})
     if collection_ids:

@@ -201,6 +201,7 @@ BUILTIN_MODELS: tuple[ModelSpec, ...] = (
         display_name="NexusBot fake model",
         context_window=32_000,
         max_output_tokens=4096,
+        supports_vision=True,
         tags=("offline",),
     ),
 )

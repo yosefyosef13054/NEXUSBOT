@@ -490,3 +490,52 @@ if (line.startsWith('id:')) lastEventId = int.parse(line.substring(3).trim());
 - Send `Idempotency-Key: <uuid>` (one per attempt, reused on retries) on `/messages`,
   `/messages/stream`, `/messages/background` and `/messages/{id}/edit`: a retry replays the
   original turn instead of creating a duplicate.
+
+---
+
+## 11. Attachments, voice, artifacts, MCP tools, sharing and push (Phase 4)
+
+### Attachments and vision
+Upload first, then reference the ids in the send. Check `GET /models` → `supports_vision`
+before attaching images (the server answers **422** otherwise unless a fallback model is set).
+
+```dart
+final form = FormData.fromMap({'file': await MultipartFile.fromFile(path, filename: name)});
+final att = (await api.dio.post('/sessions/$sid/attachments', data: form)).data;   // AttachmentRead
+await api.dio.post('/sessions/$sid/messages/stream',
+    data: {'content': 'What is in this picture?', 'attachment_ids': [att['id']]}, ...);
+```
+`user_message.data.attachments` / `MessageRead.meta.attachments` carry `{id, kind, name,
+mime_type, size_bytes, width, height, url}`; render images from `url` (authenticated GET, may
+redirect to a presigned URL), files as chips. Audio attachments show their transcript
+(`text_excerpt`).
+
+### Voice mode
+```dart
+// push-to-talk: record (wav/m4a) → one call does transcribe + reply
+final res = await api.dio.post('/sessions/$sid/messages/voice',
+    data: FormData.fromMap({'file': await MultipartFile.fromFile(clip), 'reply_audio': 'true'}));
+final gid = res.data['generation_id'];          // attach with /generations/{gid}/events
+```
+While following the generation, `audio_chunk` frames (`data.data` is base64 audio of
+`data.format`) arrive before `assistant_message`; play them in order for a streaming feel, or
+play `assistant_message.data.audio.url` afterwards. `GET /audio/voices` tells you whether
+STT/TTS exist (`stt_available`, `tts_available`) — hide the microphone when they do not.
+
+### Artifacts
+`artifact` frames (and `assistant_message.data.artifacts`) describe files produced by tools:
+show a card with name, size and a download/preview using `url` (images preview inline).
+
+### MCP tools
+`GET /tools` now includes `source: "mcp:<server>"` entries named `mcp:<server>:<tool>`; list
+them in the tool picker like built-ins (most require approval → the existing approval card).
+Org admins manage servers at `/mcp/servers` (settings screen).
+
+### Export, share and push
+```dart
+await api.dio.get('/sessions/$sid/export', queryParameters: {'format': 'markdown'});   // share sheet / save
+final share = (await api.dio.post('/sessions/$sid/share', data: {})).data;             // {token, url, expires_at}
+await api.dio.post('/devices', data: {'platform': 'android', 'token': fcmToken, 'app_version': v});
+```
+Push payloads carry `data.type == "generation_done"`, `session_id` and `generation_id`: on tap,
+open the chat and attach to the generation (or reload history if it has expired).

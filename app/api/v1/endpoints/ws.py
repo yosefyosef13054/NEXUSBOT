@@ -78,7 +78,8 @@ async def chat_ws(
         { "type": "auth", "token": "<jwt>", "org_id": "<uuid>"? }   first frame (or "api_key")
         { "type": "user_message", "content": "...", "use_rag": true, "use_tools": false,
           "tool_names": null, "model": null, "collection_ids": null,
-          "temperature": null, "max_tokens": null, "edit_of": "<message id>"? }
+          "temperature": null, "max_tokens": null, "edit_of": "<message id>"?,
+          "attachment_ids": [..]?, "voice_reply": false, "voice": null, "audio_format": null }
         { "type": "approval", "approval_id": "...", "decision": "approve" | "deny",
           "tool_call_ids": null }
         { "type": "regenerate", "temperature": null, "max_tokens": null }
@@ -176,6 +177,10 @@ async def chat_ws(
                 temperature = msg.get("temperature")
                 max_tokens = msg.get("max_tokens")
                 idempotency_key = msg.get("idempotency_key")
+                attachment_ids = _uuid_list(msg.get("attachment_ids"))
+                voice_reply = bool(msg.get("voice_reply", False))
+                voice_name = msg.get("voice")
+                audio_format = msg.get("audio_format")
                 if edit_of:
                     return chat_service.edit_message(
                         db,
@@ -193,6 +198,10 @@ async def chat_ws(
                         explicit=explicit,
                         idempotency_key=idempotency_key,
                         stop_event=stop,
+                        attachment_ids=attachment_ids,
+                        voice_reply=voice_reply,
+                        voice=voice_name,
+                        audio_format=audio_format,
                     )
                 return chat_service.stream_message(
                     db,
@@ -210,6 +219,10 @@ async def chat_ws(
                     explicit=explicit,
                     idempotency_key=idempotency_key,
                     stop_event=stop,
+                    attachment_ids=attachment_ids,
+                    voice_reply=voice_reply,
+                    voice=voice_name,
+                    audio_format=audio_format,
                 )
 
             return factory

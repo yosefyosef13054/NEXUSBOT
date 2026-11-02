@@ -9,10 +9,13 @@ from uuid import UUID, uuid4
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.agents.checkpointer import get_checkpointer
 from app.ai.agents.runner import AgentOutcome, AgentRunner
+from app.ai.artifacts import ArtifactSink
+from app.ai.attachments import build_user_message
 from app.ai.callbacks import StreamCollector
 from app.ai.chains.chat_chain import build_chat_chain
 from app.ai.chains.rag_chain import build_rag_chain
@@ -28,10 +31,12 @@ from app.ai.rag.retriever import RetrievedChunk, format_context, retrieve_chunks
 from app.ai.tools.context import ToolContext
 from app.ai.tools.registry import get_tools, requires_approval
 from app.config import settings
-from app.core.exceptions import AIProviderError
+from app.core.exceptions import AIProviderError, ValidationError
 from app.core.logger import get_logger
 from app.core.metrics import ACTIVE_GENERATIONS, APPROVALS, INTERRUPTED_GENERATIONS, LLM_LATENCY, LLM_REQUESTS
 from app.models.chat import ChatSession
+from app.services import attachment_service
+from app.services.attachment_service import AttachmentInput
 from app.services.memory_service import format_memories, recall
 from app.utils.tokens import count_message_tokens, count_tokens
 
@@ -73,6 +78,12 @@ class GenerationProgress:
     finished: bool = False
     approval: dict[str, Any] | None = None
     memories_used: list[str] = field(default_factory=list)
+    # Files produced by tools during this turn (attachment summaries).
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+
+    def add_artifact(self, record: dict[str, Any]) -> None:
+        if record.get("id") not in {a.get("id") for a in self.artifacts}:
+            self.artifacts.append(record)
 
     @property
     def text(self) -> str:
@@ -123,10 +134,21 @@ class GenerationRequest:
     # LangGraph thread for agent turns (persisted with pending approvals).
     thread_id: str = field(default_factory=lambda: uuid4().hex)
     spec: ModelSpec | None = None
+    # Images / files / transcripts attached to the user message (built by the service layer).
+    attachments: list[AttachmentInput] = field(default_factory=list)
+    # Tools served by MCP servers for this org, already wrapped as LangChain tools.
+    extra_tools: list[BaseTool] = field(default_factory=list)
+    artifact_sink: ArtifactSink | None = None
 
     @property
     def tool_context(self) -> ToolContext:
-        return ToolContext(user_id=self.user_id, session_id=self.session.id, request_id=self.request_id)
+        return ToolContext(
+            user_id=self.user_id,
+            session_id=self.session.id,
+            request_id=self.request_id,
+            org_id=self.org_id,
+            artifacts=self.artifact_sink,
+        )
 
     @property
     def effective_system_prompt(self) -> str | None:
@@ -175,9 +197,19 @@ async def _prepare_inputs(
     history = await load_recent_history(db, session_id=req.session.id)
     summary = await load_session_summary(db, session_id=req.session.id)
 
+    if (
+        attachment_service.has_images(req.attachments)
+        and req.spec is not None
+        and not req.spec.supports_vision
+    ):
+        raise ValidationError(
+            f"Model '{req.spec.id}' cannot read images",
+            details={"vision_models": [m.id for m in get_registry().available() if m.supports_vision]},
+        )
     citations: list[RetrievedChunk] = []
     inputs: dict[str, Any] = {
         "input": req.user_input,
+        "input_messages": [build_user_message(req.user_input, req.attachments)],
         "history": history,
         "summary": summary or "(none)",
     }
@@ -240,15 +272,30 @@ def initial_agent_messages(req: GenerationRequest, inputs: dict[str, Any]) -> li
     return prompt.format_messages(**{**inputs, "agent_scratchpad": []})
 
 
+def _ensure_sink(req: GenerationRequest, collector: StreamCollector) -> None:
+    if req.artifact_sink is None:
+        req.artifact_sink = ArtifactSink(
+            user_id=req.user_id,
+            org_id=req.org_id,
+            session_id=req.session.id,
+            queue=collector.queue if collector.emit_events else None,
+        )
+
+
 async def _agent_runner(req: GenerationRequest, collector: StreamCollector) -> AgentRunner:
-    tools = get_tools(req.tool_names, req.tool_context)
+    _ensure_sink(req, collector)
+    tools = [*get_tools(req.tool_names, req.tool_context), *req.extra_tools]
     llm = build_chat_llm(
         spec=req.spec, temperature=req.temperature, max_tokens=req.max_tokens, streaming=req.streaming
     )
     return AgentRunner(
         llm=llm,
         tools=tools,
-        approval_required={t.name for t in tools if requires_approval(t.name)},
+        approval_required={
+            t.name
+            for t in tools
+            if requires_approval(t.name) or bool(getattr(t, "nexusbot_requires_approval", False))
+        },
         thread_id=req.thread_id,
         checkpointer=await get_checkpointer(),
         callbacks=[collector],
@@ -316,6 +363,9 @@ async def _with_fallback(
 def _absorb_outcome(req: GenerationRequest, collector: StreamCollector | None, outcome: AgentOutcome) -> str:
     p = req.progress
     p.tool_runs = [asdict(r) for r in outcome.tool_runs]
+    if req.artifact_sink is not None:
+        for record in req.artifact_sink.records:
+            p.add_artifact(record)
     if outcome.approval:
         p.approval = {"thread_id": req.thread_id, **outcome.approval}
         APPROVALS.labels("requested").inc()
@@ -452,6 +502,8 @@ async def _consume(
             elif kind == "usage":
                 p.prompt_tokens = int(evt["data"].get("prompt_tokens") or p.prompt_tokens)
                 p.completion_tokens = int(evt["data"].get("completion_tokens") or p.completion_tokens)
+            elif kind == "artifact":
+                p.add_artifact(evt["data"])
             elif kind == "error":
                 p.errored = True
             yield evt

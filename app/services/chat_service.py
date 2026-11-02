@@ -26,23 +26,26 @@ from app.ai.orchestrator import (
     stream,
 )
 from app.ai.providers.registry import get_registry
-from app.ai.tools.registry import list_tool_names, unknown_tool_names
+from app.ai.tools.registry import is_external, list_tool_names, unknown_tool_names
+from app.ai.voice import tts
 from app.cache.redis_client import get_redis
 from app.config import settings
 from app.core import idempotency
 from app.core.background import run_in_background, spawn_detached
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ServiceUnavailableError, ValidationError
 from app.core.logger import get_logger
 from app.core.metrics import APPROVALS
 from app.core.streams import GenerationLog
 from app.db.session import db_session
 from app.models.approval import Approval, ApprovalStatus
 from app.models.assistant import Assistant
+from app.models.attachment import Attachment, AttachmentKind
 from app.models.chat import ChatMessage, ChatSession, MessageRole
 from app.models.organization import Membership, Organization
 from app.models.tool_call import ToolCall
 from app.schemas.chat import SearchResult
-from app.services import memory_service, quota_service
+from app.services import attachment_service, mcp_service, memory_service, push_service, quota_service
+from app.services.attachment_service import AttachmentInput
 from app.services.collection_service import ensure_collections
 from app.services.org_service import allowed_model, org_settings
 from app.services.session_service import autogenerate_title_if_needed, get_session, session_collection_ids
@@ -96,6 +99,13 @@ class TurnSettings:
     assistant_model: str | None = None
     org_default_model: str | None = None
     use_memory: bool = False
+    # Attachments bound to the user message of this turn (ids) and voice output.
+    attachment_ids: list[UUID] = field(default_factory=list)
+    voice_reply: bool = False
+    voice: str | None = None
+    audio_format: str | None = None
+    # External (MCP) tool names selected for this turn, validated against the org.
+    mcp_tool_names: list[str] = field(default_factory=list)
 
     def generation_meta(self, model_used: str | None) -> dict[str, Any]:
         return {
@@ -121,6 +131,7 @@ class TurnSettings:
             max_tokens=gen.get("max_tokens"),
             system_prompt=gen.get("system_prompt"),
             use_memory=use_memory,
+            mcp_tool_names=[n for n in (gen.get("tool_names") or []) if is_external(n)],
         )
 
 
@@ -132,6 +143,53 @@ def _validate_tools(use_tools: bool, tool_names: list[str] | None) -> None:
         raise ValidationError(
             "Unknown tools requested", details={"unknown": unknown, "available": list_tool_names()}
         )
+
+
+async def _validate_external_tools(
+    db: AsyncSession, *, scope: TurnScope, use_tools: bool, tool_names: list[str] | None
+) -> list[str]:
+    """`mcp:<server>:<tool>` names must exist on an enabled server of the active org."""
+    names = [n for n in (tool_names or []) if is_external(n)]
+    if not use_tools or not names:
+        return []
+    specs, unknown = await mcp_service.resolve_tool_names(db, org_id=scope.org_id, names=names)
+    if unknown:
+        raise ValidationError(
+            "Unknown tools requested",
+            details={"unknown": unknown, "available": [s.full_name for s in specs]},
+        )
+    return [s.full_name for s in specs]
+
+
+async def _resolve_vision_model(
+    scope: TurnScope,
+    session_obj: ChatSession,
+    *,
+    model: str | None,
+    assistant_model: str | None,
+    org_default_model: str | None,
+) -> str | None:
+    """The model that will answer must read images; fall back or refuse."""
+    registry = get_registry()
+    spec = registry.resolve(
+        model, session_obj.model, assistant_model, scope.user_default_model, org_default_model
+    )
+    if spec.supports_vision:
+        return model
+    fallback = settings.VISION_FALLBACK_MODEL
+    if (
+        fallback
+        and registry.is_available(fallback)
+        and (scope.org is None or allowed_model(scope.org, fallback))
+    ):
+        return fallback
+    raise ValidationError(
+        f"Model '{spec.id}' cannot read images; pick a vision-capable model",
+        details={
+            "model": spec.id,
+            "vision_models": [m.id for m in registry.available() if m.supports_vision],
+        },
+    )
 
 
 async def _assistant_for(db: AsyncSession, session_obj: ChatSession) -> Assistant | None:
@@ -156,6 +214,10 @@ async def resolve_turn_settings(
     temperature: float | None,
     max_tokens: int | None,
     explicit: set[str] | None = None,
+    attachments: list[Attachment] | None = None,
+    voice_reply: bool = False,
+    voice: str | None = None,
+    audio_format: str | None = None,
 ) -> TurnSettings:
     """Request fields win; then the session's assistant; then the session; then defaults."""
     explicit = explicit or set()
@@ -183,6 +245,9 @@ async def resolve_turn_settings(
         assistant_memory = assistant.memory_enabled
 
     _validate_tools(use_tools, tool_names)
+    mcp_tool_names = await _validate_external_tools(
+        db, scope=scope, use_tools=use_tools, tool_names=tool_names
+    )
     get_registry().validate(model)
 
     org_default_model = None
@@ -201,6 +266,22 @@ async def resolve_turn_settings(
     else:
         scoped = session_collection_ids(session_obj)
 
+    attachments = attachments or []
+    if any(a.kind == AttachmentKind.IMAGE for a in attachments):
+        model = await _resolve_vision_model(
+            scope,
+            session_obj,
+            model=model,
+            assistant_model=assistant_model,
+            org_default_model=org_default_model,
+        )
+    if voice_reply and not tts.available():
+        raise ServiceUnavailableError(
+            "Text-to-speech is not configured", details={"code": "voice_unavailable"}
+        )
+    if voice_reply and voice and voice not in tts.voices():
+        raise ValidationError(f"Unknown voice '{voice}'", details={"voices": tts.voices()})
+
     return TurnSettings(
         use_rag=use_rag,
         use_tools=use_tools,
@@ -213,6 +294,11 @@ async def resolve_turn_settings(
         assistant_model=assistant_model,
         org_default_model=org_default_model,
         use_memory=settings.MEMORY_ENABLED and scope.memory_enabled and assistant_memory,
+        attachment_ids=[a.id for a in attachments],
+        voice_reply=voice_reply,
+        voice=voice,
+        audio_format=audio_format,
+        mcp_tool_names=mcp_tool_names,
     )
 
 
@@ -226,6 +312,8 @@ def _build_request(
     request_id: str | None,
     stop_event: asyncio.Event | None = None,
     thread_id: str | None = None,
+    attachments: list[AttachmentInput] | None = None,
+    extra_tools: list[Any] | None = None,
 ) -> GenerationRequest:
     req = GenerationRequest(
         user_id=scope.user_id,
@@ -247,10 +335,34 @@ def _build_request(
         streaming=streaming,
         request_id=request_id,
         stop_event=stop_event,
+        attachments=list(attachments or []),
+        extra_tools=list(extra_tools or []),
     )
     if thread_id:
         req.thread_id = thread_id
     return req
+
+
+async def _turn_inputs(
+    db: AsyncSession, *, scope: TurnScope, turn: TurnSettings, attachment_ids: list[UUID] | None = None
+) -> tuple[list[AttachmentInput], list[Any]]:
+    """What the model gets beyond text: attachment inputs and external tools."""
+    ids = list(attachment_ids if attachment_ids is not None else turn.attachment_ids)
+    inputs = await attachment_service.load_inputs(db, ids) if ids else []
+    tools: list[Any] = []
+    if turn.use_tools and turn.mcp_tool_names:
+        tools = await mcp_service.build_tools(db, org_id=scope.org_id, names=turn.mcp_tool_names)
+    return inputs, tools
+
+
+def _attachment_ids_of(msg: ChatMessage | None) -> list[UUID]:
+    out: list[UUID] = []
+    for item in ((msg.meta or {}) if msg else {}).get("attachments") or []:
+        try:
+            out.append(UUID(str(item.get("id"))))
+        except (ValueError, AttributeError):
+            continue
+    return out
 
 
 async def _check_quota(db: AsyncSession, scope: TurnScope) -> None:
@@ -363,7 +475,12 @@ async def _set_active_leaf(db: AsyncSession, session_id: UUID, leaf_id: UUID | N
 
 
 async def _persist_user_message(
-    db: AsyncSession, *, session_id: UUID, content: str, parent_id: UUID | None
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    content: str,
+    parent_id: UUID | None,
+    attachments: list[Attachment] | None = None,
 ) -> ChatMessage:
     msg = ChatMessage(
         session_id=session_id,
@@ -372,11 +489,24 @@ async def _persist_user_message(
         tokens=count_tokens(content),
         parent_id=parent_id,
         created_at=_now(),
+        meta={"attachments": [attachment_service.summary(a) for a in attachments]} if attachments else {},
     )
     db.add(msg)
     await db.flush()
+    if attachments:
+        await attachment_service.bind(db, attachments, message_id=msg.id)
     await _set_active_leaf(db, session_id, msg.id)
     return msg
+
+
+def _merge_artifacts(existing: Any, more: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = [a for a in (existing or []) if isinstance(a, dict)]
+    seen = {a.get("id") for a in out}
+    for a in more or []:
+        if a.get("id") not in seen:
+            out.append(a)
+            seen.add(a.get("id"))
+    return out
 
 
 def _usage_payload(prompt: int, completion: int, embedding: int = 0) -> dict[str, int]:
@@ -480,6 +610,7 @@ async def _persist_assistant_message(
     placeholder: ChatMessage | None = None,
     parent_id: UUID | None = None,
     memories_used: list[str] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
 ) -> ChatMessage:
     meta: dict[str, Any] = {
         **((placeholder.meta if placeholder else None) or {}),
@@ -500,6 +631,7 @@ async def _persist_assistant_message(
     else:
         meta.pop("approval", None)
     meta["memories_used"] = list(memories_used or meta.get("memories_used") or [])
+    meta["artifacts"] = _merge_artifacts(meta.get("artifacts"), artifacts)
     if placeholder is not None:
         placeholder.content = content
         placeholder.tokens = usage.get("completion_tokens") or count_tokens(content)
@@ -612,6 +744,7 @@ async def _finish_turn(
     parent_id: UUID | None = None,
     org_id: UUID | None = None,
     memories_used: list[str] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
 ) -> tuple[ChatMessage, dict[str, int], list[ChatMessage]]:
     """Persist everything a turn produced: tool messages, the assistant message (new or the
     approval placeholder updated in place), the audit rows and the usage row; move the
@@ -645,11 +778,19 @@ async def _finish_turn(
         placeholder=placeholder,
         parent_id=parent_id,
         memories_used=memories_used,
+        artifacts=artifacts,
     )
     for m in tool_msgs:
         m.parent_id = assistant_msg.id
     if tool_msgs:
         await db.flush()
+    artifact_ids = []
+    for a in artifacts or []:
+        try:
+            artifact_ids.append(UUID(str(a.get("id"))))
+        except (ValueError, AttributeError):
+            continue
+    await attachment_service.bind_ids(db, artifact_ids, message_id=assistant_msg.id)
     if status != STATUS_AWAITING_APPROVAL:
         await _log_tool_calls(
             db, user_id=user_id, session_id=session_id, message_id=assistant_msg.id, tool_runs=tool_runs
@@ -709,6 +850,7 @@ async def _stored_turn_response(db: AsyncSession, payload: dict[str, Any]) -> di
         "citations": meta.get("citations", []),
         "tool_calls": meta.get("tool_calls", []),
         "usage": meta.get("usage", {}),
+        "artifacts": meta.get("artifacts", []),
         "approval": meta.get("approval"),
         "replayed": True,
     }
@@ -732,6 +874,10 @@ async def send_message(
     scope: TurnScope | None = None,
     explicit: set[str] | None = None,
     idempotency_key: str | None = None,
+    attachment_ids: list[UUID] | None = None,
+    voice_reply: bool = False,
+    voice: str | None = None,
+    audio_format: str | None = None,
 ) -> dict[str, Any]:
     scope = scope or TurnScope(user_id=user_id, user_default_model=user_default_model)
     if idempotency_key:
@@ -758,13 +904,30 @@ async def send_message(
             temperature=temperature,
             max_tokens=max_tokens,
             explicit=explicit,
+            attachments=await attachment_service.claim(
+                db, ids=list(attachment_ids or []), user_id=scope.user_id, session_id=session_id
+            ),
+            voice_reply=voice_reply,
+            voice=voice,
+            audio_format=audio_format,
         )
         parent_id = await active_leaf_id(db, session_obj)
-        user_msg = await _persist_user_message(
-            db, session_id=session_id, content=content, parent_id=parent_id
+        rows = await attachment_service.claim(
+            db, ids=list(attachment_ids or []), user_id=scope.user_id, session_id=session_id
         )
+        user_msg = await _persist_user_message(
+            db, session_id=session_id, content=content, parent_id=parent_id, attachments=rows
+        )
+        inputs, extra_tools = await _turn_inputs(db, scope=scope, turn=turn)
         req = _build_request(
-            scope, session_obj, turn, user_input=content, streaming=False, request_id=request_id
+            scope,
+            session_obj,
+            turn,
+            user_input=content,
+            streaming=False,
+            request_id=request_id,
+            attachments=inputs,
+            extra_tools=extra_tools,
         )
         result: GenerationResult = await generate(db, req)
         generation = turn.generation_meta(result.model)
@@ -790,6 +953,7 @@ async def send_message(
             parent_id=user_msg.id,
             org_id=scope.org_id,
             memories_used=req.progress.memories_used,
+            artifacts=req.progress.artifacts,
         )
         approval_payload: dict[str, Any] | None = None
         if result.approval:
@@ -805,6 +969,15 @@ async def send_message(
             approval_payload = approval_read(row)
             assistant_msg.meta = {**assistant_msg.meta, "approval": approval_payload}
             await db.flush()
+        if turn.voice_reply and result.text and approval_payload is None:
+            await _attach_spoken_reply(
+                db,
+                scope=scope,
+                assistant_msg=assistant_msg,
+                text=result.text,
+                voice=turn.voice,
+                fmt=turn.audio_format or tts.default_format(),
+            )
         await db.commit()
     except Exception:
         if idempotency_key:
@@ -834,6 +1007,7 @@ async def send_message(
         "tool_calls": result.tool_runs,
         "usage": usage,
         "approval": approval_payload,
+        "artifacts": (assistant_msg.meta or {}).get("artifacts", []),
     }
 
 
@@ -899,6 +1073,8 @@ def _assistant_event(
             "status": status,
             "approval": (msg.meta or {}).get("approval"),
             "memories_used": (msg.meta or {}).get("memories_used", []),
+            "artifacts": (msg.meta or {}).get("artifacts", []),
+            "audio": (msg.meta or {}).get("audio"),
         },
     }
 
@@ -915,9 +1091,14 @@ async def _run_streaming_turn(
     scope: TurnScope,
     user_text: str,
     use_memory: bool,
+    voice_reply: bool = False,
+    voice: str | None = None,
+    audio_format: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Republish orchestrator events, turning `approval_required` into a persisted
-    approval and finishing the turn (new message or placeholder updated in place)."""
+    approval and finishing the turn (new message or placeholder updated in place).
+    With `voice_reply` the finished text is synthesized sentence by sentence
+    (`audio_chunk` events, then `audio_done`) before `assistant_message`."""
     p = req.progress
     user_id, session_id = scope.user_id, req.session.id
 
@@ -947,6 +1128,7 @@ async def _run_streaming_turn(
                     parent_id=parent_id,
                     org_id=scope.org_id,
                     memories_used=p.memories_used,
+                    artifacts=p.artifacts,
                 )
                 row = await _create_approval(
                     db,
@@ -1012,8 +1194,14 @@ async def _run_streaming_turn(
         parent_id=parent_id,
         org_id=scope.org_id,
         memories_used=p.memories_used,
+        artifacts=p.artifacts,
     )
     await db.commit()
+    if voice_reply and p.text:
+        async for evt in _speak_reply(
+            db, scope=scope, assistant_msg=assistant_msg, text=p.text, voice=voice, audio_format=audio_format
+        ):
+            yield evt
     await _schedule_maintenance(session_id)
     if status == "ok":
         await _schedule_memory_extraction(
@@ -1024,6 +1212,103 @@ async def _run_streaming_turn(
             use_memory=use_memory,
         )
     yield _assistant_event(assistant_msg, p, usage, status)
+
+
+async def _speak_reply(
+    db: AsyncSession,
+    *,
+    scope: TurnScope,
+    assistant_msg: ChatMessage,
+    text: str,
+    voice: str | None,
+    audio_format: str | None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Synthesize the reply in sentence-sized chunks; keep the whole clip as an attachment."""
+    import base64
+
+    fmt = audio_format or tts.default_format()
+    mime = tts.mime_for(fmt)
+    chunks = tts.split_sentences(text)
+    collected: list[bytes] = []
+    index = 0
+    try:
+        for piece in chunks:
+            data = await tts.synthesize_bytes(piece, voice=voice, fmt=fmt)
+            collected.append(data)
+            yield {
+                "type": "audio_chunk",
+                "data": {
+                    "index": index,
+                    "text": piece,
+                    "format": fmt,
+                    "mime_type": mime,
+                    "data": base64.b64encode(data).decode(),
+                },
+            }
+            index += 1
+    except Exception as e:  # noqa: BLE001 — audio is best effort; the text reply already exists
+        logger.warning("tts_failed", error=str(e)[:200])
+        yield {"type": "audio_done", "data": {"chunks": index, "attachment": None, "error": str(e)[:200]}}
+        return
+    attachment_payload: dict[str, Any] | None = None
+    if collected and settings.VOICE_PERSIST_REPLIES:
+        # WAV chunks cannot be concatenated byte-wise (each has a header): keep the single
+        # chunk as-is, otherwise synthesize the whole text once more for the stored clip.
+        full = collected[0] if len(collected) == 1 else None
+        attachment_payload = await _attach_spoken_reply(
+            db,
+            scope=scope,
+            assistant_msg=assistant_msg,
+            text=text,
+            voice=voice,
+            fmt=fmt,
+            data=full,
+            chunks=index,
+        )
+        await db.commit()
+    yield {"type": "audio_done", "data": {"chunks": index, "attachment": attachment_payload}}
+
+
+async def _attach_spoken_reply(
+    db: AsyncSession,
+    *,
+    scope: TurnScope,
+    assistant_msg: ChatMessage,
+    text: str,
+    voice: str | None,
+    fmt: str,
+    data: bytes | None = None,
+    chunks: int = 1,
+) -> dict[str, Any] | None:
+    """Store the spoken reply as an audio attachment of the assistant message and record
+    it in `meta.audio`; returns the attachment summary (None when synthesis fails)."""
+    if not settings.VOICE_PERSIST_REPLIES:
+        return None
+    try:
+        clip = data if data is not None else await tts.synthesize_bytes(text, voice=voice, fmt=fmt)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tts_failed", error=str(e)[:200])
+        return None
+    att = await attachment_service.store_bytes(
+        db,
+        user_id=scope.user_id,
+        org_id=scope.org_id,
+        session_id=assistant_msg.session_id,
+        kind=AttachmentKind.AUDIO,
+        name=f"reply-{str(assistant_msg.id)[:8]}.{fmt}",
+        data=clip,
+        mime_type=tts.mime_for(fmt),
+        message_id=assistant_msg.id,
+        text=text[: settings.ATTACHMENT_TEXT_MAX_CHARS],
+        meta={"voice": voice or settings.TTS_VOICE, "format": fmt},
+    )
+    payload = attachment_service.summary(att)
+    assistant_msg.meta = {
+        **(assistant_msg.meta or {}),
+        "audio": {"attachment_id": str(att.id), "url": payload["url"], "format": fmt, "chunks": chunks},
+    }
+    await db.flush()
+    return payload
 
 
 # --------------------------------------------------------------------------- generation logs
@@ -1075,6 +1360,7 @@ def _user_message_event(user_msg: ChatMessage, generation_id: str) -> dict[str, 
             "role": "user",
             "created_at": user_msg.created_at.isoformat(),
             "generation_id": generation_id,
+            "attachments": (user_msg.meta or {}).get("attachments", []),
         },
     }
 
@@ -1096,6 +1382,10 @@ class _GenerationJob:
     resume_decision: dict[str, Any] | None = None
     thread_id: str | None = None
     generation_meta: dict[str, Any] = field(default_factory=dict)
+    # Attachments of the user message (model inputs are loaded when the job runs).
+    attachment_ids: list[UUID] = field(default_factory=list)
+    # Push a notification when the turn finishes (background / voice turns).
+    notify: bool = False
 
 
 _TAGGED_EVENT_TYPES = {"done", "assistant_message", "approval_required", "error", "user_message"}
@@ -1125,6 +1415,9 @@ async def _run_generation_job(job: _GenerationJob) -> None:
         async with db_session() as db:
             session_obj = await get_session(db, user_id=job.scope.user_id, session_id=job.session_id)
             placeholder = await db.get(ChatMessage, job.placeholder_id) if job.placeholder_id else None
+            inputs, extra_tools = await _turn_inputs(
+                db, scope=job.scope, turn=job.turn, attachment_ids=job.attachment_ids
+            )
             req = _build_request(
                 job.scope,
                 session_obj,
@@ -1134,6 +1427,8 @@ async def _run_generation_job(job: _GenerationJob) -> None:
                 request_id=job.request_id,
                 stop_event=job.stop_event,
                 thread_id=job.thread_id or job.generation_id,
+                attachments=inputs,
+                extra_tools=extra_tools,
             )
             generation = dict(job.generation_meta) or job.turn.generation_meta(None)
             if job.resume_decision is not None:
@@ -1151,12 +1446,25 @@ async def _run_generation_job(job: _GenerationJob) -> None:
                 scope=job.scope,
                 user_text=job.user_text,
                 use_memory=job.turn.use_memory,
+                voice_reply=job.turn.voice_reply,
+                voice=job.turn.voice,
+                audio_format=job.turn.audio_format,
             )
+            final_text = ""
             try:
                 async for evt in turn:
+                    if evt.get("type") == "assistant_message":
+                        final_text = str((evt.get("data") or {}).get("content") or "")
                     await log.append(_tag_generation(evt, job.generation_id))
             finally:
                 await turn.aclose()
+            if job.notify:
+                await push_service.notify_generation_done(
+                    user_id=job.scope.user_id,
+                    session_id=job.session_id,
+                    generation_id=job.generation_id,
+                    preview=final_text,
+                )
     except asyncio.CancelledError:
         status = "cancelled"
         raise
@@ -1220,10 +1528,17 @@ async def start_turn(
     idempotency_key: str | None = None,
     stop_event: asyncio.Event | None = None,
     edit_of: UUID | None = None,
+    attachment_ids: list[UUID] | None = None,
+    voice_reply: bool = False,
+    voice: str | None = None,
+    audio_format: str | None = None,
+    notify: bool = False,
 ) -> TurnHandle:
     """Validate, persist the user message and launch the generation in the background.
 
     `edit_of` creates the new user message as a sibling of that message (a branch).
+    `attachment_ids` are bound to the new user message; `voice_reply` adds synthesized
+    audio events; `notify` sends a push notification when the reply is ready.
     """
     if idempotency_key:
         state, stored = await idempotency.begin(scope.user_id, idempotency_key)
@@ -1250,6 +1565,12 @@ async def start_turn(
             temperature=temperature,
             max_tokens=max_tokens,
             explicit=explicit,
+            attachments=await attachment_service.claim(
+                db, ids=list(attachment_ids or []), user_id=scope.user_id, session_id=session_id
+            ),
+            voice_reply=voice_reply,
+            voice=voice,
+            audio_format=audio_format,
         )
         if edit_of is not None:
             edited = await db.get(ChatMessage, edit_of)
@@ -1260,8 +1581,11 @@ async def start_turn(
             parent_id = edited.parent_id
         else:
             parent_id = await active_leaf_id(db, session_obj)
+        rows = await attachment_service.claim(
+            db, ids=list(attachment_ids or []), user_id=scope.user_id, session_id=session_id
+        )
         user_msg = await _persist_user_message(
-            db, session_id=session_id, content=content, parent_id=parent_id
+            db, session_id=session_id, content=content, parent_id=parent_id, attachments=rows
         )
         await db.commit()
     except Exception:
@@ -1289,6 +1613,8 @@ async def start_turn(
         request_id=request_id,
         stop_event=stop_event or asyncio.Event(),
         parent_id=user_msg.id,
+        attachment_ids=[a.id for a in rows],
+        notify=notify,
     )
     spawn_detached(f"generation:{generation_id}", _run_generation_job(job))
     return TurnHandle(generation_id=generation_id, user_message=user_msg)
@@ -1313,6 +1639,10 @@ async def stream_message(
     scope: TurnScope | None = None,
     explicit: set[str] | None = None,
     idempotency_key: str | None = None,
+    attachment_ids: list[UUID] | None = None,
+    voice_reply: bool = False,
+    voice: str | None = None,
+    audio_format: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Start a turn and stream its events (`user_message`, `token`…, `done`, `assistant_message`).
 
@@ -1337,6 +1667,10 @@ async def stream_message(
         request_id=request_id,
         idempotency_key=idempotency_key,
         stop_event=stop_event,
+        attachment_ids=attachment_ids,
+        voice_reply=voice_reply,
+        voice=voice,
+        audio_format=audio_format,
     )
     async for evt in follow_generation(handle.generation_id):
         yield evt
@@ -1360,6 +1694,10 @@ async def edit_message(
     request_id: str | None = None,
     idempotency_key: str | None = None,
     stop_event: asyncio.Event | None = None,
+    attachment_ids: list[UUID] | None = None,
+    voice_reply: bool = False,
+    voice: str | None = None,
+    audio_format: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Edit a user message: a sibling user message starts a new branch and gets a reply."""
     handle = await start_turn(
@@ -1379,6 +1717,10 @@ async def edit_message(
         idempotency_key=idempotency_key,
         stop_event=stop_event,
         edit_of=message_id,
+        attachment_ids=attachment_ids,
+        voice_reply=voice_reply,
+        voice=voice,
+        audio_format=audio_format,
     )
     async for evt in follow_generation(handle.generation_id):
         yield evt
@@ -1460,6 +1802,7 @@ async def resolve_approval(
     log = GenerationLog(generation_id)
     await log.start(session_id=session_id, user_id=scope.user_id, user_message_id=None)
     user_text = ""
+    parent: ChatMessage | None = None
     if placeholder is not None and placeholder.parent_id is not None:
         parent = await db.get(ChatMessage, placeholder.parent_id)
         user_text = parent.content if parent else ""
@@ -1477,6 +1820,9 @@ async def resolve_approval(
         resume_decision={"decision": decision, "tool_call_ids": tool_call_ids},
         thread_id=row.thread_id,
         generation_meta=gen,
+        attachment_ids=_attachment_ids_of(parent)
+        if placeholder is not None and placeholder.parent_id
+        else [],
     )
     spawn_detached(f"generation:{generation_id}", _run_generation_job(job))
     async for evt in follow_generation(generation_id):
@@ -1614,8 +1960,18 @@ async def regenerate_last(
         turn.system_prompt = assistant.system_prompt
         turn.assistant_model = assistant.model if get_registry().is_available(assistant.model) else None
 
+    inputs, extra_tools = await _turn_inputs(
+        db, scope=scope, turn=turn, attachment_ids=_attachment_ids_of(last_user)
+    )
     req = _build_request(
-        scope, session_obj, turn, user_input=last_user.content, streaming=False, request_id=request_id
+        scope,
+        session_obj,
+        turn,
+        user_input=last_user.content,
+        streaming=False,
+        request_id=request_id,
+        attachments=inputs,
+        extra_tools=extra_tools,
     )
     result = await generate(db, req)
     generation = turn.generation_meta(result.model)
@@ -1640,6 +1996,7 @@ async def regenerate_last(
         approval=result.approval,
         parent_id=last_user.id,
         org_id=scope.org_id,
+        artifacts=req.progress.artifacts,
     )
     if result.approval:
         row = await _create_approval(
@@ -1707,6 +2064,7 @@ async def regenerate_stream(
         stop_event=stop_event or asyncio.Event(),
         operation="chat_regenerate",
         parent_id=last_user.id,
+        attachment_ids=_attachment_ids_of(last_user),
     )
     spawn_detached(f"generation:{generation_id}", _run_generation_job(job))
     async for evt in follow_generation(generation_id):

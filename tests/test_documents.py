@@ -129,7 +129,7 @@ async def test_delete_document_removes_file(client, queue):
     acct = await register_and_login(client)
     r = await _upload(client, acct, "gone.txt", b"to be deleted")
     doc_id = r.json()["document"]["id"]
-    user_dir = Path(os.environ["UPLOAD_DIR"]) / acct["user"]["id"]
+    user_dir = Path(os.environ["UPLOAD_DIR"]) / "documents" / acct["user"]["id"]
     assert any(user_dir.iterdir())
     r = await client.delete(f"{P}/documents/{doc_id}", headers=auth_headers(acct))
     assert r.status_code == 200
@@ -142,7 +142,7 @@ async def test_ingest_failure_is_recorded(client, db, queue):
     acct = await register_and_login(client)
     r = await _upload(client, acct, "lost.txt", b"content that will vanish")
     doc_id = r.json()["document"]["id"]
-    user_dir = Path(os.environ["UPLOAD_DIR"]) / acct["user"]["id"]
+    user_dir = Path(os.environ["UPLOAD_DIR"]) / "documents" / acct["user"]["id"]
     for f in user_dir.iterdir():
         f.unlink()
     with pytest.raises(FileNotFoundError):

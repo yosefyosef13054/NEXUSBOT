@@ -162,8 +162,82 @@ class Settings(BaseSettings):
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10
 
     # ---- Storage ----
+    # local: files under UPLOAD_DIR (single host). s3: any S3-compatible bucket (AWS, MinIO,
+    # R2…) so API and workers can run on different hosts.
+    STORAGE_BACKEND: str = "local"
     UPLOAD_DIR: str = "/data/uploads"
+    S3_BUCKET: str = ""
+    S3_ENDPOINT_URL: str = ""
+    S3_REGION: str = "us-east-1"
+    S3_ACCESS_KEY_ID: str = ""
+    S3_SECRET_ACCESS_KEY: str = ""
+    S3_FORCE_PATH_STYLE: bool = True
+    # Presigned download URLs for attachments on S3 (0 = always proxy bytes through the API).
+    S3_PRESIGN_SECONDS: int = 900
     MAX_UPLOAD_MB: int = 25
+
+    # ---- Attachments (images, audio, files on chat messages) ----
+    MAX_ATTACHMENT_MB: int = 20
+    ALLOWED_IMAGE_TYPES: List[str] = Field(
+        default_factory=lambda: ["image/png", "image/jpeg", "image/webp", "image/gif"]
+    )
+    ALLOWED_AUDIO_TYPES: List[str] = Field(
+        default_factory=lambda: [
+            "audio/wav",
+            "audio/x-wav",
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/x-m4a",
+            "audio/webm",
+            "audio/ogg",
+            "audio/flac",
+        ]
+    )
+    # Text extracted from file attachments is given to the model inline (chat-with-a-file).
+    ATTACHMENT_TEXT_MAX_CHARS: int = 20000
+    # Used when the requested model cannot read images (empty = reject with 422).
+    VISION_FALLBACK_MODEL: str = ""
+
+    # ---- Voice ----
+    # auto: OpenAI when a key is configured, fake in AI_FAKE_MODE, otherwise disabled.
+    STT_PROVIDER: str = "auto"  # auto | openai | fake | none
+    STT_MODEL: str = "whisper-1"
+    TTS_PROVIDER: str = "auto"  # auto | openai | fake | none
+    TTS_MODEL: str = "tts-1"
+    TTS_VOICE: str = "alloy"
+    TTS_FORMAT: str = "mp3"  # mp3 | wav | opus | aac | flac
+    # Keep synthesized replies as audio attachments so they can be replayed later.
+    VOICE_PERSIST_REPLIES: bool = True
+    VOICE_MAX_CHARS: int = 4000
+
+    # ---- Code execution tool (run_python) ----
+    # Runs model-written Python in a subprocess with resource limits. It is NOT a security
+    # boundary against a hostile model on a shared host: keep it off unless the host is
+    # disposable or further sandboxed (container, gVisor, Firecracker).
+    CODE_EXECUTION_ENABLED: bool = False
+    CODE_EXECUTION_TIMEOUT_SECONDS: int = 30
+    CODE_EXECUTION_MEMORY_MB: int = 512
+    CODE_EXECUTION_MAX_OUTPUT_FILES: int = 10
+    CODE_EXECUTION_MAX_FILE_MB: int = 10
+
+    # ---- Model Context Protocol (external tool servers) ----
+    MCP_ENABLED: bool = True
+    # stdio servers run a command on the API host: server administrators only, and only
+    # when explicitly allowed.
+    MCP_ALLOW_STDIO: bool = False
+    MCP_CALL_TIMEOUT_SECONDS: int = 60
+    MCP_TOOLS_CACHE_SECONDS: int = 300
+
+    # ---- Sharing / export ----
+    # Public base URL used to build share links (e.g. https://chat.example.com).
+    PUBLIC_BASE_URL: str = ""
+    SHARE_LINK_DEFAULT_HOURS: int = 24 * 7
+
+    # ---- Push notifications ----
+    # none | webhook (POST a JSON envelope to PUSH_WEBHOOK_URL; bridge it to FCM/APNs/OneSignal)
+    PUSH_PROVIDER: str = "none"
+    PUSH_WEBHOOK_URL: str = ""
+    PUSH_WEBHOOK_SECRET: str = ""
     ALLOWED_UPLOAD_EXTENSIONS: List[str] = Field(
         default_factory=lambda: [
             ".pdf",
@@ -192,6 +266,8 @@ class Settings(BaseSettings):
     @field_validator(
         "ALLOWED_ORIGINS",
         "ALLOWED_UPLOAD_EXTENSIONS",
+        "ALLOWED_IMAGE_TYPES",
+        "ALLOWED_AUDIO_TYPES",
         "OLLAMA_MODELS",
         "ENABLED_MODELS",
         "DISABLED_MODELS",

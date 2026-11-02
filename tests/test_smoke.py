@@ -56,7 +56,15 @@ def test_tool_registry_scoped_tool_needs_context():
 
 def test_prompt_composes_rag_and_tools():
     p = build_chat_prompt(use_rag=True, use_tools=True)
-    rendered = p.format_messages(input="hi", history=[], summary="", context="ctx", agent_scratchpad=[])
+    from langchain_core.messages import HumanMessage
+
+    rendered = p.format_messages(
+        input_messages=[HumanMessage(content="hi")],
+        history=[],
+        summary="",
+        context="ctx",
+        agent_scratchpad=[],
+    )
     assert any("Retrieved context" in m.content for m in rendered)
 
 

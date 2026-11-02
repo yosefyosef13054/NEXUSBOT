@@ -19,10 +19,11 @@ def build_chat_prompt(
 ) -> ChatPromptTemplate:
     """Compose the chat prompt from the requested capabilities.
 
-    Input variables at invoke time: `input`, `history`, `summary`, plus `context` when
-    `use_rag` and `agent_scratchpad` (injected by the agent executor) when `use_tools`.
-    `memory_messages` is an optional list with one system message carrying what the
-    assistant remembers about the user (see `app.services.memory_service`).
+    Input variables at invoke time: `input_messages` (one human message — a string or
+    content parts with images, see `app.ai.attachments`), `history`, `summary`, plus
+    `context` when `use_rag` and `agent_scratchpad` (injected by the agent executor) when
+    `use_tools`. `memory_messages` is an optional list with one system message carrying
+    what the assistant remembers about the user (see `app.services.memory_service`).
     """
     parts: list[str] = [system_prompt or DEFAULT_ASSISTANT_V1]
     if use_rag:
@@ -37,7 +38,7 @@ def build_chat_prompt(
         ("system", "\n\n".join(parts)),
         MessagesPlaceholder("memory_messages", optional=True),
         MessagesPlaceholder("history"),
-        ("human", "{input}"),
+        MessagesPlaceholder("input_messages"),
     ]
     if use_tools:
         # Required by `create_openai_tools_agent`: the executor appends tool call/result

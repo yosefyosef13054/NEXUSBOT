@@ -91,6 +91,13 @@ class SendMessageRequest(BaseModel):
     collection_ids: list[UUID] | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=16, le=8192)
+    # Attachments uploaded to this session (POST /sessions/{id}/attachments) to bind to
+    # this message: images for vision models, files/audio as extracted text.
+    attachment_ids: list[UUID] | None = None
+    # Speak the reply: `audio_chunk` events (base64) before `assistant_message`.
+    voice_reply: bool = False
+    voice: str | None = Field(default=None, max_length=64)
+    audio_format: Literal["mp3", "wav", "opus", "aac", "flac"] | None = None
 
 
 class Citation(BaseModel):
@@ -115,6 +122,7 @@ class SendMessageResponse(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     usage: dict[str, int] = Field(default_factory=dict)
     approval: dict[str, Any] | None = None
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class StreamEvent(BaseModel):
@@ -130,6 +138,9 @@ class StreamEvent(BaseModel):
         "citations",
         "usage",
         "approval_required",
+        "artifact",
+        "audio_chunk",
+        "audio_done",
         "done",
         "assistant_message",
         "error",
