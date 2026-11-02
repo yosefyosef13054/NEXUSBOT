@@ -80,13 +80,18 @@ class Scope:
     user_id: UUID
     session_id: UUID | None = None
     collection_ids: list[UUID] | None = None
+    org_id: UUID | None = None
 
     def apply(self, stmt: Select) -> Select:
-        stmt = stmt.where(
-            Document.user_id == self.user_id,
-            Document.deleted_at.is_(None),
-            Document.status == DocumentStatus.READY,
-        )
+        stmt = stmt.where(Document.deleted_at.is_(None), Document.status == DocumentStatus.READY)
+        if self.org_id is not None:
+            # Own documents plus anything shared through a collection of the organization.
+            stmt = stmt.where(
+                Document.org_id == self.org_id,
+                or_(Document.user_id == self.user_id, Document.collection_id.is_not(None)),
+            )
+        else:
+            stmt = stmt.where(Document.user_id == self.user_id)
         if self.collection_ids:
             in_collections = Document.collection_id.in_(self.collection_ids)
             if self.session_id is not None:
@@ -104,9 +109,10 @@ async def has_ready_documents(
     user_id: UUID,
     session_id: UUID | None = None,
     collection_ids: list[UUID] | None = None,
+    org_id: UUID | None = None,
 ) -> bool:
     """Cheap existence check so users without documents never pay for a query embedding."""
-    scope = Scope(user_id=user_id, session_id=session_id, collection_ids=collection_ids)
+    scope = Scope(user_id=user_id, session_id=session_id, collection_ids=collection_ids, org_id=org_id)
     stmt = scope.apply(select(Document.id)).limit(1)
     return (await session.execute(stmt)).first() is not None
 
@@ -170,6 +176,7 @@ async def retrieve_chunks(
     collection_ids: list[UUID] | None = None,
     queries: list[str] | None = None,
     spec: ModelSpec | None = None,
+    org_id: UUID | None = None,
 ) -> RetrievalResult:
     """Return the best chunks for `query` (and optional expanded `queries`).
 

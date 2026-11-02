@@ -66,6 +66,11 @@ class ServiceUnavailableError(AppException):
     code = "service_unavailable"
 
 
+class QuotaExceededError(AppException):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "quota_exceeded"
+
+
 def request_id_of(request: Request) -> str | None:
     state = request.scope.get("state") or {}
     return state.get("request_id") or getattr(request.state, "request_id", None)

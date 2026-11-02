@@ -21,9 +21,9 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - run: ruff check app tests
-      - run: ruff format --check app tests
-      - run: mypy app
+      - run: ruff check app tests evals
+      - run: ruff format --check app tests evals
+      - run: mypy app evals
 
   test:
     name: Tests (Postgres + Redis)

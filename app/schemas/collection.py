@@ -18,6 +18,7 @@ class CollectionUpdateRequest(BaseModel):
 
 class CollectionRead(BaseModel):
     id: UUID
+    org_id: UUID | None = None
     name: str
     description: str | None = None
     document_count: int = 0

@@ -110,21 +110,24 @@ reload, migrations as a one-shot job, multiple uvicorn workers).
 <td width="50%" valign="top">
 
 ### 💬 Chat
-- Multi-session, multi-user
-- Persistent history (cursor pagination)
+- Multi-session, multi-user, **multi-workspace** (orgs with owner/admin/member roles)
+- Persistent history (cursor pagination) on a **message tree**: edit a message or regenerate
+  a reply and switch between the resulting branches
+- **Assistants** (personas): system prompt, model, tools, collections and memory defaults per org
 - Titles generated in the background after the first turn
-- Regenerate last response (replays the turn's RAG/tool settings)
-- Search across all chats
+- Thumbs up/down feedback per reply; search across all chats
 
 </td>
 <td width="50%" valign="top">
 
 ### ⚡ Streaming
-- Server-Sent Events (`/messages/stream`)
-- WebSocket (`/ws/sessions/{id}`) with first-frame auth and a `stop` frame
-- **Identical JSON event format** on both
+- Server-Sent Events (`/messages/stream`) and WebSocket (`/ws/sessions/{id}`) with
+  first-frame auth — **identical JSON event format** on both
 - Tokens, citations, tool calls, usage, done
-- Disconnect or stop → model call cancelled, partial reply persisted
+- **Resumable**: every frame is logged with a sequence number; reconnect and replay what you
+  missed, or start a turn in the background and attach later
+- Explicit `stop` → partial reply persisted; disconnects never lose a reply
+- `Idempotency-Key` on sends: retries never duplicate a turn
 
 </td>
 </tr>
@@ -164,6 +167,8 @@ reload, migrations as a one-shot job, multiple uvicorn workers).
 ### 🧠 Memory
 - Windowed short-term history (configurable)
 - Long-term rolling summary per session
+- **Long-term user memory**: facts, preferences and standing instructions recalled by
+  similarity into every turn and extracted automatically after turns (per-user opt-out)
 - Auto-compaction when the token budget is exceeded, after the reply is delivered
 - Token-aware via `tiktoken` (with an offline fallback)
 
@@ -280,12 +285,25 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 | `POST`   | `/auth/refresh`            | Rotate the refresh token, get a new pair |
 | `POST`   | `/auth/logout`             | Revoke one refresh token |
 | `POST`   | `/auth/logout-all`         | Revoke every refresh token |
-| `GET`    | `/auth/me`                 | Current user profile |
-| `PATCH`  | `/auth/me`                 | Update profile / default model |
+| `GET`    | `/auth/me`                 | Current user profile (incl. `personal_org_id`) |
+| `PATCH`  | `/auth/me`                 | Update profile / default model / memory opt-out |
 | `POST`   | `/auth/change-password`    | Change password (signs other devices out) |
 | `DELETE` | `/auth/me`                 | Delete account (password confirmed) |
 | `POST`   | `/auth/api-keys`           | Mint API key (shown once) |
 | `DELETE` | `/auth/api-keys/{id}`      | Revoke API key |
+
+### Organizations, usage & assistants
+All resources live in the active org, chosen per request with `X-Org-Id` (default: personal org).
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET`/`POST` | `/orgs` · `/orgs/{id}` | Workspaces; `PATCH` settings: budgets, default / allowed models |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/orgs/{id}/members…` | Members by email, roles owner / admin / member |
+| `GET`    | `/usage/me`                | Month-to-date usage + remaining budget (quota → **429 `quota_exceeded`**) |
+| `GET`    | `/orgs/{id}/usage`         | Admin report grouped by user / model / day |
+| `GET`    | `/admin/usage` · `/admin/feedback` | Platform-wide reports for server admins |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/assistants…` | Personas: prompt, model, tools, collections, defaults |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/memories…` | Long-term user memory |
 
 ### Models & tools
 | Method | Endpoint | Purpose |
@@ -296,7 +314,7 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 ### Sessions
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST`   | `/sessions`                | Create session (validated `model`, `meta.collection_ids`) |
+| `POST`   | `/sessions`                | Create session (validated `model`, `assistant_id`, `meta.collection_ids`) |
 | `GET`    | `/sessions`                | List (paginated) |
 | `GET`    | `/sessions/{id}`           | Get one |
 | `PATCH`  | `/sessions/{id}`           | Update title / system prompt |
@@ -305,14 +323,21 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 ### Chat
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/sessions/{id}/messages`             | Send & receive (blocking) |
-| `POST` | `/sessions/{id}/messages/stream`      | **SSE stream** |
-| `POST` | `/sessions/{id}/messages/regenerate`  | Regenerate last turn |
-| `GET`  | `/sessions/{id}/messages`             | History (cursor pagination, incl. tool messages) |
+| `POST` | `/sessions/{id}/messages`             | Send & receive (blocking, `Idempotency-Key`) |
+| `POST` | `/sessions/{id}/messages/stream`      | **SSE stream** (`id:` sequence numbers) |
+| `POST` | `/sessions/{id}/messages/background`  | Start a turn, **202**, attach later |
+| `GET`  | `/sessions/{id}/generations/{gid}/events` | Replay / follow a generation (`after`, `Last-Event-ID`) |
+| `GET`  | `/sessions/{id}/generations/active`   | In-flight turn for this session |
+| `POST` | `/sessions/{id}/generations/{gid}/stop` | Stop a generation (partial reply persisted) |
+| `POST` | `/sessions/{id}/messages/{mid}/edit`  | Edit a user message → new branch (SSE) |
+| `POST` | `/sessions/{id}/messages/regenerate` · `…/regenerate/stream` | Regenerate; previous reply kept as a sibling |
+| `GET`  | `/sessions/{id}/messages/{mid}/siblings` · `POST /sessions/{id}/branch` | Browse / switch branches |
+| `POST`/`DELETE` | `/sessions/{id}/messages/{mid}/feedback` | Thumbs up / down |
+| `GET`  | `/sessions/{id}/messages`             | History of the active branch (cursor pagination, incl. tool messages) |
 | `GET`  | `/sessions/{id}/approvals`            | Pending tool approvals |
 | `POST` | `/sessions/{id}/approvals/{aid}`      | Approve / deny → **SSE continuation** |
 | `POST` | `/search`                             | Full-text search with highlights |
-| `WS`   | `/ws/sessions/{id}`                   | **WebSocket stream** (auth in first frame, `approval` frame) |
+| `WS`   | `/ws/sessions/{id}`                   | **WebSocket stream** (auth in first frame, `approval` / `regenerate` / `stop` frames) |
 
 ### Documents & collections (RAG)
 | Method | Endpoint | Purpose |
@@ -329,7 +354,7 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 ### Streaming wire format (identical for SSE & WS)
 
 ```jsonc
-{ "type": "user_message",      "data": { "id": "…", "content": "…" } }
+{ "type": "user_message",      "data": { "id": "…", "content": "…", "generation_id": "…" }, "seq": 1 }
 { "type": "citations",         "data": [ { "document_name": "spec.pdf", "score": 0.84, "excerpt": "…" } ] }
 { "type": "token",             "data": "Hel" }
 { "type": "token",             "data": "lo" }
@@ -337,8 +362,10 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 { "type": "approval_required", "data": { "approval_id": "…", "tool_calls": [ { "tool": "fetch_url", "input": {…} } ] } }
 { "type": "usage",             "data": { "prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552 } }
 { "type": "done",              "data": { "text": "Hello!", "latency_ms": 820, "interrupted": false } }
-{ "type": "assistant_message", "data": { "id": "…", "content": "Hello!", "citations": [], "interrupted": false } }
+{ "type": "assistant_message", "data": { "id": "…", "content": "Hello!", "citations": [], "interrupted": false, "memories_used": [] } }
 ```
+Every frame carries `generation_id` and `seq` (the SSE `id:`), so a client can resume from
+`GET /sessions/{id}/generations/{generation_id}/events?after=<seq>` after a dropped connection.
 
 Errors: `{ "error": { "code", "message", "details" }, "request_id": "…" }` plus an `X-Request-Id` header.
 
@@ -395,7 +422,9 @@ The integration patterns are documented standalone in [`docs/flutter_integration
 nexusbot/
 ├─ app/
 │  ├─ api/v1/endpoints/      # REST + SSE + WebSocket routes
-│  │  ├─ auth.py · sessions.py · chat.py · documents.py · ws.py · health.py
+│  │  ├─ auth.py · orgs.py · usage.py · admin.py · assistants.py · memories.py
+│  │  ├─ sessions.py · chat.py (messages, branches, generations, feedback) · documents.py · collections.py
+│  │  ├─ ws.py · health.py · models.py
 │  │  └─ router.py
 │  ├─ ai/                    # LangChain layer
 │  │  ├─ providers/          # Model catalog, registry (routing), factory per provider
@@ -409,10 +438,10 @@ nexusbot/
 │  │  ├─ agents/             # LangGraph graph · runner · Postgres checkpointer
 │  │  ├─ tools/              # registry (approval flags) · context · calculator · web_search · fetch_url · db
 │  │  └─ rag/                # loader · splitter · embedder · retriever (hybrid) · rerank · query · pipeline
-│  ├─ services/              # auth · chat (approvals) · sessions · documents · collections · usage
+│  ├─ services/              # auth · org · quota · assistant · memory · feedback · chat (tree, generation jobs, approvals) · sessions · documents · collections · usage
 │  ├─ models/                # SQLAlchemy ORM (UUIDs, soft-delete)
 │  ├─ schemas/               # Pydantic request/response contracts
-│  ├─ core/                  # security · deps · exceptions · rate_limit · middleware · metrics · background · logger
+│  ├─ core/                  # security · deps (Principal) · exceptions · rate_limit · streams (generation log) · idempotency · middleware · metrics · background · logger
 │  ├─ db/                    # Async engine + sessions (API pool, worker NullPool)
 │  ├─ cache/                 # Redis client
 │  ├─ workers/               # Celery app + tasks
@@ -420,6 +449,7 @@ nexusbot/
 │  ├─ config.py              # Centralized settings (pydantic-settings)
 │  └─ main.py                # FastAPI factory + middleware + lifespan
 ├─ alembic/                  # DB migrations
+├─ evals/                    # Eval harness: datasets · graders · runner · CLI
 ├─ docs/                     # api.md · flutter_integration.md
 ├─ postman/                  # Importable collection
 ├─ assets/                   # Logo · banner · architecture diagram
@@ -457,6 +487,10 @@ Every knob lives in [`.env.example`](.env.example). The important ones:
 | `CHAT_MAX_HISTORY_MESSAGES` | `20`           | Windowed memory size |
 | `CHAT_SUMMARY_TRIGGER_TOKENS` | `3000`       | When the summarizer kicks in |
 | `GENERATION_TIMEOUT_SECONDS`| `180`          | Hard cap per generation |
+| `MEMORY_ENABLED` / `MEMORY_TOP_K` / `MEMORY_MAX_PER_USER` | `true` / `6` / `500` | Long-term user memory recall + extraction |
+| `QUOTA_CACHE_SECONDS`       | `30`           | Month-to-date usage cache for org budgets |
+| `STREAM_EVENTS_TTL_SECONDS` | `3600`         | How long a generation can be resumed after a disconnect |
+| `IDEMPOTENCY_TTL_SECONDS`   | `86400`        | Lifetime of `Idempotency-Key` results |
 | `RATE_LIMIT_PER_MINUTE`     | `60`           | Per user (chat, uploads) |
 | `AUTH_RATE_LIMIT_PER_MINUTE`| `10`           | Per IP (register, login) |
 | `MAX_UPLOAD_MB`             | `25`           | Upload guard |
@@ -483,11 +517,22 @@ pytest
 
 The suite runs with `AI_FAKE_MODE` so it never needs a provider key (the fake model can be
 scripted to call tools). It covers the auth lifecycle (rotation, reuse detection, logout,
-deletion), chat over REST/SSE/WebSocket, stop and disconnect handling (including a real uvicorn
+deletion), chat over REST/SSE/WebSocket, stop and disconnect/resume handling (including a real uvicorn
 subprocess to exercise client disconnects over sockets), the agent loop with approvals and
 budgets, model routing, hybrid retrieval, collections, URL ingestion with SSRF guards, upload
-validation and dedup, metrics and middleware. CI runs the same on
-every push with Postgres and Redis service containers.
+validation and dedup, workspaces and roles, quotas, assistants, feedback, memory recall and
+extraction, branching, background / resumable generations, idempotency keys, the eval
+harness, metrics and middleware. CI runs the same on every push with Postgres and Redis
+service containers.
+
+### Evals
+
+```bash
+AI_FAKE_MODE=true python -m evals.run --dataset evals/datasets/chat_smoke.jsonl
+python -m evals.run --dataset evals/datasets/chat_smoke.jsonl --model gpt-4o-mini --fail-under 0.9 --out reports/smoke.json
+```
+Datasets are JSONL cases graded with deterministic checks or an LLM judge; see
+[`evals/README.md`](evals/README.md).
 
 ---
 
@@ -495,7 +540,7 @@ every push with Postgres and Redis service containers.
 
 - [x] **Phase 1 — foundation** (v1.1): everything above actually works, CI, metrics, account lifecycle
 - [x] **Phase 2 — AI core** (v1.2): multi-provider models with real routing and fallbacks, LangGraph agent with human-in-the-loop approvals and persisted tool messages, hybrid retrieval + reranking + structured citations, URL ingestion, collections
-- [ ] **Phase 3 — product layer**: workspaces & roles, assistants, quotas, feedback, admin API, user memory, conversation branching, resumable streams, eval harness
+- [x] **Phase 3 — product layer** (v1.3): workspaces & roles, assistants, quotas, feedback, admin API, user memory, conversation branching, resumable streams, eval harness
 - [ ] **Phase 4 — multimodal & mobile depth**: attachments & vision, voice, artifacts, object storage, MCP tools, offline-first client, i18n/RTL, push, release pipeline
 
 PRs welcome.

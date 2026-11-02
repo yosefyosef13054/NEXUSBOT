@@ -13,16 +13,29 @@ from app.core.exceptions import NotFoundError
 from app.models.chat import ChatMessage, ChatSession, MessageRole
 from app.services.collection_service import ensure_collections
 
+_UNSET: object = object()
 
-async def _validated_meta(db: AsyncSession, *, user_id: UUID, meta: dict | None) -> dict:
-    """`meta.collection_ids` is the chat's knowledge scope; make sure the ids are the user's."""
+
+async def _validated_meta(db: AsyncSession, *, org_id: UUID | None, meta: dict | None) -> dict:
+    """`meta.collection_ids` is the chat's knowledge scope; make sure the ids are the org's."""
     meta = dict(meta or {})
     raw = meta.get("collection_ids")
     if raw:
         ids = [UUID(str(x)) for x in raw]
-        await ensure_collections(db, user_id=user_id, ids=ids)
+        await ensure_collections(db, org_id=org_id, ids=ids)
         meta["collection_ids"] = [str(i) for i in ids]
     return meta
+
+
+async def _validated_assistant(
+    db: AsyncSession, *, org_id: UUID | None, assistant_id: UUID | None
+) -> UUID | None:
+    if assistant_id is None or org_id is None:
+        return None
+    from app.services.assistant_service import get_assistant
+
+    await get_assistant(db, org_id=org_id, assistant_id=assistant_id)
+    return assistant_id
 
 
 async def create_session(
@@ -32,14 +45,18 @@ async def create_session(
     title: str | None,
     system_prompt: str | None,
     model: str | None,
+    org_id: UUID | None = None,
+    assistant_id: UUID | None = None,
     meta: dict | None = None,
 ) -> ChatSession:
     obj = ChatSession(
         user_id=user_id,
+        org_id=org_id,
+        assistant_id=await _validated_assistant(db, org_id=org_id, assistant_id=assistant_id),
         title=title or "New chat",
         system_prompt=system_prompt,
         model=get_registry().validate(model),
-        meta=await _validated_meta(db, user_id=user_id, meta=meta),
+        meta=await _validated_meta(db, org_id=org_id, meta=meta),
     )
     db.add(obj)
     await db.flush()
@@ -54,9 +71,11 @@ async def get_session(db: AsyncSession, *, user_id: UUID, session_id: UUID) -> C
 
 
 async def list_sessions(
-    db: AsyncSession, *, user_id: UUID, page: int, page_size: int
+    db: AsyncSession, *, user_id: UUID, page: int, page_size: int, org_id: UUID | None = None
 ) -> tuple[list[ChatSession], int]:
     base = select(ChatSession).where(ChatSession.user_id == user_id, ChatSession.deleted_at.is_(None))
+    if org_id is not None:
+        base = base.where(ChatSession.org_id == org_id)
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
         (
@@ -78,6 +97,7 @@ async def update_session(
     title: str | None = None,
     system_prompt: str | None = None,
     model: str | None = None,
+    assistant_id: UUID | None | object = _UNSET,
     meta: dict | None = None,
 ) -> ChatSession:
     obj = await get_session(db, user_id=user_id, session_id=session_id)
@@ -87,9 +107,12 @@ async def update_session(
         obj.system_prompt = system_prompt
     if model is not None:
         obj.model = get_registry().validate(model)
+    if assistant_id is not _UNSET:
+        aid = assistant_id if isinstance(assistant_id, UUID) else None
+        obj.assistant_id = await _validated_assistant(db, org_id=obj.org_id, assistant_id=aid)
     if meta is not None:
         merged = {**(obj.meta or {}), **meta}
-        obj.meta = await _validated_meta(db, user_id=user_id, meta=merged)
+        obj.meta = await _validated_meta(db, org_id=obj.org_id, meta=merged)
     await db.flush()
     # `updated_at` is set server-side via onupdate, so it's expired after the
     # UPDATE. Refresh now (in the async context) so response serialization

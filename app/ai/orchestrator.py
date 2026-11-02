@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, TypeVar
 from uuid import UUID, uuid4
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,7 @@ from app.core.exceptions import AIProviderError
 from app.core.logger import get_logger
 from app.core.metrics import ACTIVE_GENERATIONS, APPROVALS, INTERRUPTED_GENERATIONS, LLM_LATENCY, LLM_REQUESTS
 from app.models.chat import ChatSession
+from app.services.memory_service import format_memories, recall
 from app.utils.tokens import count_message_tokens, count_tokens
 
 logger = get_logger(__name__)
@@ -71,6 +72,7 @@ class GenerationProgress:
     errored: bool = False
     finished: bool = False
     approval: dict[str, Any] | None = None
+    memories_used: list[str] = field(default_factory=list)
 
     @property
     def text(self) -> str:
@@ -103,6 +105,13 @@ class GenerationRequest:
     model: str | None = None
     user_default_model: str | None = None
     collection_ids: list[UUID] | None = None
+    org_id: UUID | None = None
+    # Inject the user's long-term memories into the system prompt.
+    use_memory: bool = False
+    # Assistant / organization defaults (lower priority than request and session).
+    system_prompt: str | None = None
+    assistant_model: str | None = None
+    org_default_model: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
     streaming: bool = True
@@ -118,6 +127,10 @@ class GenerationRequest:
     @property
     def tool_context(self) -> ToolContext:
         return ToolContext(user_id=self.user_id, session_id=self.session.id, request_id=self.request_id)
+
+    @property
+    def effective_system_prompt(self) -> str | None:
+        return self.session.system_prompt or self.system_prompt
 
 
 @dataclass
@@ -143,7 +156,9 @@ def citations_payload(citations: list[RetrievedChunk]) -> list[dict[str, Any]]:
 
 
 def resolve_spec_for(req: GenerationRequest) -> ModelSpec:
-    spec = req.spec or get_registry().resolve(req.model, req.session.model, req.user_default_model)
+    spec = req.spec or get_registry().resolve(
+        req.model, req.session.model, req.assistant_model, req.user_default_model, req.org_default_model
+    )
     _use_spec(req, spec)
     return spec
 
@@ -167,6 +182,12 @@ async def _prepare_inputs(
         "summary": summary or "(none)",
     }
 
+    if req.use_memory and req.user_input.strip():
+        memories = await recall(db, user_id=req.user_id, org_id=req.org_id, query=req.user_input)
+        if memories:
+            inputs["memory_messages"] = [SystemMessage(content=format_memories(memories))]
+            req.progress.memories_used = [str(m.id) for m in memories]
+
     if req.use_rag:
         search_query = req.user_input
         if settings.RAG_QUERY_REWRITE and history:
@@ -178,6 +199,7 @@ async def _prepare_inputs(
             session_id=req.session.id,
             collection_ids=req.collection_ids,
             spec=req.spec,
+            org_id=req.org_id,
         )
         citations = retrieval.chunks
         req.progress.embedding_tokens = retrieval.query_tokens
@@ -190,7 +212,7 @@ async def _prepare_inputs(
 def _build_chain(req: GenerationRequest):
     builder = build_rag_chain if req.use_rag else build_chat_chain
     return builder(
-        system_prompt=req.session.system_prompt,
+        system_prompt=req.effective_system_prompt,
         temperature=req.temperature,
         max_tokens=req.max_tokens,
         streaming=req.streaming,
@@ -214,7 +236,7 @@ def _run_config(req: GenerationRequest, collector: StreamCollector) -> RunnableC
 
 
 def initial_agent_messages(req: GenerationRequest, inputs: dict[str, Any]) -> list[BaseMessage]:
-    prompt = build_chat_prompt(system_prompt=req.session.system_prompt, use_rag=req.use_rag, use_tools=True)
+    prompt = build_chat_prompt(system_prompt=req.effective_system_prompt, use_rag=req.use_rag, use_tools=True)
     return prompt.format_messages(**{**inputs, "agent_scratchpad": []})
 
 
@@ -241,7 +263,7 @@ def estimate_prompt_tokens(req: GenerationRequest, inputs: dict[str, Any]) -> in
     used when the provider does not report usage."""
     try:
         prompt = build_chat_prompt(
-            system_prompt=req.session.system_prompt, use_rag=req.use_rag, use_tools=req.use_tools
+            system_prompt=req.effective_system_prompt, use_rag=req.use_rag, use_tools=req.use_tools
         )
         messages = prompt.format_messages(**{**inputs, "agent_scratchpad": []})
         return count_message_tokens(

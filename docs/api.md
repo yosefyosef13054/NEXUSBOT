@@ -17,8 +17,12 @@ also carries an `X-Request-Id` header; send your own `X-Request-Id` to have it e
 ```
 
 Error codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `conflict` (409),
-`validation_error` (422), `rate_limited` (429, with `Retry-After`), `ai_provider_error` (502),
-`service_unavailable` (503), `internal_error` (500).
+`validation_error` (422), `rate_limited` (429, with `Retry-After`), `quota_exceeded` (429, see
+*Usage & quotas*), `ai_provider_error` (502), `service_unavailable` (503), `internal_error` (500).
+
+**Workspaces.** Every resource (sessions, documents, collections, assistants, usage) belongs to
+an organization. Each user has a personal org; pick the active one per request with
+`X-Org-Id: <uuid>` (absent → personal org; non-members get **403**). See *Organizations*.
 
 ---
 
@@ -92,6 +96,65 @@ Revokes the key.
 
 ---
 
+## Organizations (workspaces)
+
+Each user gets a **personal org** at registration (`UserRead.personal_org_id`). Users can create
+shared orgs and invite members by email. Roles: `owner` (creator, cannot be removed), `admin`
+(manage members, settings, assistants) and `member`.
+
+| Method | Endpoint | Body | Notes |
+|---|---|---|---|
+| `GET`    | `/orgs` | | the caller's orgs with `role`, `member_count`, `settings` |
+| `POST`   | `/orgs` | `{name}` | **201** `OrgRead`, creator becomes owner |
+| `GET`    | `/orgs/{id}` | | members only |
+| `PATCH`  | `/orgs/{id}` | `{name?, settings?}` | admin/owner |
+| `GET`    | `/orgs/{id}/members` | | `{items: [{user_id, email, full_name, role, joined_at}]}` |
+| `POST`   | `/orgs/{id}/members` | `{email, role: admin\|member}` | admin/owner; **404** no such user, **409** already a member |
+| `PATCH`  | `/orgs/{id}/members/{user_id}` | `{role}` | admin/owner |
+| `DELETE` | `/orgs/{id}/members/{user_id}` | | admins remove anyone but the owner; members may remove themselves |
+| `GET`    | `/orgs/{id}/usage?group_by=user\|model\|day&from=&to=` | | admin/owner, see *Usage & quotas* |
+
+`settings` (all optional, `null` = unlimited / server default):
+```json
+{ "budget_tokens_per_month": 2000000, "budget_usd_per_month": 25.0,
+  "default_model": "gpt-4o-mini", "allowed_models": ["gpt-4o-mini", "claude-haiku-5-5"] }
+```
+A turn whose requested / session / assistant model is not in `allowed_models` → **422** with
+`details.allowed_models`. `default_model` sits between the user default and the server default
+in the resolution order (request → session → assistant → user → org → server).
+
+---
+
+## Usage & quotas
+
+### `GET /usage/me`
+Month-to-date usage for the caller and the active org:
+```json
+{ "period": {"start": "2026-11-01T00:00:00+00:00", "end": "2026-12-01T00:00:00+00:00"},
+  "user": {"tokens": 12345, "cost_usd": 0.42, "messages": 17},
+  "org":  {"id": "…", "tokens": 99999, "cost_usd": 3.1, "messages": 120,
+           "budget_tokens_per_month": null, "budget_usd_per_month": 10.0,
+           "remaining_tokens": null, "remaining_usd": 6.9} }
+```
+When an org budget is exhausted every generation request (blocking, stream, background,
+edit, regenerate, approval continuation) fails with **429**:
+```json
+{ "error": { "code": "quota_exceeded", "message": "Monthly token budget exhausted for this organization",
+             "details": { "budget_tokens_per_month": 1000000, "used_tokens": 1000312,
+                          "resets_at": "2026-12-01T00:00:00+00:00" } } }
+```
+Month-to-date usage is cached for `QUOTA_CACHE_SECONDS` and kept current as turns are
+logged, so a budget trips on the next turn.
+
+### `GET /orgs/{id}/usage?group_by=user|model|day`
+Admin report: `{period, group_by, totals: {tokens, cost_usd, messages}, groups: [{key, tokens, cost_usd, messages}]}`
+(`key` is the member email, model id or `YYYY-MM-DD`).
+
+### `GET /admin/usage?group_by=org|user|model|day` · `GET /admin/feedback?page=&page_size=`
+Platform-wide reports for **server administrators** (`users.role == "admin"`); **403** otherwise.
+
+---
+
 ## Models & tools
 
 ### `GET /models`
@@ -121,6 +184,54 @@ when nothing was streamed yet.
 
 ---
 
+## Assistants (personas)
+
+Reusable personas shared inside an org: a system prompt, model, tools, collections, RAG /
+tool / memory defaults. Attach one to a session (`POST /sessions {assistant_id}` /
+`PATCH /sessions/{id} {assistant_id}`): its settings become the defaults for every turn and the
+request body still overrides field by field (a field is "set" when present in the JSON).
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `GET`    | `/assistants?page=&page_size=` | all assistants of the active org |
+| `POST`   | `/assistants` | **201**; any member; `model` / `tool_names` / `collection_ids` validated |
+| `GET`    | `/assistants/{id}` | |
+| `PATCH`  | `/assistants/{id}` | creator or org admin (**403** otherwise); unknown fields → **422** |
+| `DELETE` | `/assistants/{id}` | creator or org admin; sessions keep working with plain defaults |
+
+```json
+{ "id": "…", "org_id": "…", "name": "Support bot", "description": "…", "avatar": "🤖",
+  "system_prompt": "You are …", "model": "gpt-4o-mini", "tool_names": ["calculator"],
+  "collection_ids": ["…"], "use_rag": true, "use_tools": true, "temperature": 0.3,
+  "memory_enabled": true, "is_default": false, "created_by": "…", "created_at": "…", "updated_at": "…" }
+```
+`is_default: true` is exclusive per org (setting it clears the previous default). A session's
+own `system_prompt` wins over the assistant's.
+
+---
+
+## Memory (long-term, per user)
+
+Durable facts, preferences and standing instructions about the user, recalled by similarity
+into every turn (`MEMORY_ENABLED`, `MEMORY_TOP_K`; instructions are always included) and
+**extracted automatically** after turns by a small model call. Recall and extraction need the
+server setting, the user (`PATCH /auth/me {"memory_enabled": false}` opts out) and the
+session's assistant (`memory_enabled`) to allow it. Memories live in the user's personal org or
+the org they were learned in.
+
+| Method | Endpoint | Body |
+|---|---|---|
+| `GET`    | `/memories?page=&page_size=` | |
+| `POST`   | `/memories` | `{content, kind?: fact\|preference\|instruction, importance?: 1..5}` → **201**; **409** near-duplicate |
+| `PATCH`  | `/memories/{id}` | `{content?, kind?, importance?}` |
+| `DELETE` | `/memories/{id}` · `DELETE /memories` | one / all |
+
+`MemoryRead`: `{id, content, kind, importance, source_message_id, created_at, last_used_at}`.
+The memories injected into a reply are listed in `assistant_message.meta.memories_used`
+(ids; always present, `[]` when none).
+
+---
+
 ## Sessions
 
 ### `POST /sessions`
@@ -141,6 +252,11 @@ is then generated **in the background** (re-fetch the session list a moment late
 ```
 ### `DELETE /sessions/{session_id}`
 Soft delete.
+
+---
+
+`SessionRead` carries `org_id`, `assistant_id` and `active_leaf_id` (the message the
+conversation currently ends at — see *Branches*).
 
 ---
 
@@ -175,6 +291,16 @@ and the new message), not just the user text.
 Unknown `tool_names` → **422** with `details.unknown` and `details.available`.
 Rate limited **per user** (`RATE_LIMIT_PER_MINUTE`).
 
+**Idempotency.** Send `Idempotency-Key: <uuid>` (one per send attempt, reused on retries) on
+`/messages`, `/messages/stream`, `/messages/background` and `/messages/{id}/edit`. A retry
+within `IDEMPOTENCY_TTL_SECONDS` (24 h) does not create a second turn: blocking requests get
+the original response, streams and background turns replay the original generation. A retry
+while the first attempt is still running → **409**. Keys are scoped to the user.
+
+`MessageRead` carries `parent_id` (the message tree) and, in history and sibling responses,
+`siblings: {index, count}` when the message has alternatives (edits of a user message,
+regenerations of a reply); `meta.feedback` mirrors the caller's rating.
+
 `assistant_message.meta` contains `model`, `provider`, `latency_ms`, `citations`,
 `tool_calls`, `usage`, `status` (`ok` | `interrupted` | `error` | `awaiting_approval`),
 `interrupt_reason`, `approval` (while parked) and `generation` (the settings used for the
@@ -201,11 +327,15 @@ history; the assistant's reply already incorporates them.
 ### `POST /sessions/{id}/messages/stream` — Server-Sent Events
 
 Same body. Send `Accept: text/event-stream`. The response is `text/event-stream`, starts with a
-`: connected` comment frame, and then one JSON frame per event:
+`: connected` comment frame, and then one JSON frame per event, each with an SSE `id:` (the
+frame's sequence number in the generation log — keep the last one you saw):
 
 ```
-data: {"type":"token","data":"Hel"}\n\n
+id: 7\ndata: {"type":"token","data":"Hel","generation_id":"…","seq":7}\n\n
 ```
+
+Every frame carries `generation_id`; the `user_message`, `done`, `assistant_message`,
+`approval_required` and `error` payloads carry it inside `data` too.
 
 | type | data |
 |---|---|
@@ -219,10 +349,28 @@ data: {"type":"token","data":"Hel"}\n\n
 | `done` | `{ text, latency_ms, model, provider, prompt_tokens, completion_tokens, interrupted, interrupt_reason, status, thread_id }` |
 | `assistant_message` | final persisted message incl. `citations`, `tool_calls`, `usage`, `model`, `interrupted`, `status`, `approval` |
 
-**Stopping:** closing the connection cancels the model call immediately. The partial reply is
-persisted with `meta.status = "interrupted"` and `interrupt_reason = "disconnect"`, so the next
-history load is consistent with what the client displayed. Generations also time out after
-`GENERATION_TIMEOUT_SECONDS` (`interrupt_reason = "timeout"`).
+**Disconnects do not stop the turn.** The generation runs detached from the connection and
+every frame is written to a Redis-backed log (kept `STREAM_EVENTS_TTL_SECONDS`, 1 h). A client
+that loses its connection re-attaches with the events endpoint below and receives exactly the
+frames it missed; the reply is persisted either way. **Stopping is explicit:**
+`POST /sessions/{id}/generations/{generation_id}/stop` (or the WebSocket `stop` frame) ends the
+model call; the partial reply is persisted with `meta.status = "interrupted"`,
+`interrupt_reason = "stop"` and the stream still finishes with `done` + `assistant_message`
+(`interrupted: true`). Generations also time out after `GENERATION_TIMEOUT_SECONDS`
+(`interrupt_reason = "timeout"`).
+
+### Background turns and resumable streams
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `POST` | `/sessions/{id}/messages/background` | `SendMessageRequest` → **202** `{generation_id, user_message}`; the reply is produced even if nobody is listening |
+| `GET`  | `/sessions/{id}/generations/{generation_id}/events?after=<seq>` | SSE: replays frames with `seq > after` (also honours `Last-Event-ID`), then follows live until `assistant_message`; **404** unknown / expired |
+| `GET`  | `/sessions/{id}/generations/active` | `{generation_id, started_at, status}` of the in-flight turn, or `null` — call it when a chat screen opens |
+| `POST` | `/sessions/{id}/generations/{generation_id}/stop` | stop the turn (partial reply persisted); idempotent |
+
+Mobile flow: start with `/messages/background` (or `/messages/stream`), remember
+`generation_id` and the last `id:`, and on resume call `/generations/{generation_id}/events`
+with `Last-Event-ID`.
 
 ### Approvals (human-in-the-loop)
 
@@ -254,21 +402,35 @@ resolved or expired (`APPROVAL_TTL_MINUTES`). Over WebSocket send
 #### `GET /sessions/{id}/approvals?status=pending`
 Pending (or `approved` | `denied` | `expired`) approvals, for reconciling after an app restart.
 
-### `POST /sessions/{id}/messages/regenerate`
-```json
-{ "temperature": 0.7 }
-```
-Soft-deletes the previous assistant turn and generates a new one against the same user input,
-using the same RAG/tool settings as the original turn.
+### Branches: edit, regenerate, siblings
+
+Messages form a tree. Editing a user message or regenerating a reply creates a **sibling**
+instead of overwriting; the session's `active_leaf_id` selects which branch history shows.
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| `POST` | `/sessions/{id}/messages/{message_id}/edit` | `SendMessageRequest` (`content` required), `Accept: text/event-stream` → same frames as `/stream`; the edit becomes a sibling of `message_id` (same `parent_id`), is answered, and its branch becomes active. Only user messages (**422** otherwise) |
+| `POST` | `/sessions/{id}/messages/regenerate` | `{temperature?, max_tokens?}` → `RegenerateResponse`; a new reply to the last user message of the active branch, **the previous reply is kept as a sibling**, same RAG/tool settings |
+| `POST` | `/sessions/{id}/messages/regenerate/stream` | same, streamed |
+| `GET`  | `/sessions/{id}/messages/{message_id}/siblings` | `{items: [MessageRead…], active_index}` — all alternatives of a message, oldest first |
+| `POST` | `/sessions/{id}/branch` | `{leaf_message_id}` → `HistoryResponse` of the newly active branch (the chosen message's newest descendant becomes the leaf) |
 
 ### `GET /sessions/{id}/messages?cursor=ISO8601&limit=50`
-Cursor-paginated history (newest fetched first via `cursor=created_at`).
+Cursor-paginated history of the **active branch** (linear, oldest first; newest fetched first
+via `cursor=created_at`). Messages with alternatives carry `siblings: {index, count}`.
+
+### Feedback
+
+`POST /sessions/{id}/messages/{message_id}/feedback` `{"rating": 1 | -1, "comment": "…"}` →
+`{message_id, session_id, user_id, rating, comment, created_at}` (upsert, assistant messages
+only). `DELETE …/feedback` removes it. The rating is mirrored in `MessageRead.meta.feedback`;
+server admins list all feedback at `GET /admin/feedback`.
 
 ### `POST /search`
 ```json
 { "query": "invoice", "limit": 20 }
 ```
-Full-text (stemmed, ranked) search over the user's messages. Results carry `highlight`
+Full-text (stemmed, ranked) search over the user's messages in the active org. Results carry `highlight`
 (matched terms wrapped in `<mark>…</mark>`) and `rank`; very short or unparseable queries fall
 back to substring matching.
 
@@ -338,10 +500,10 @@ Scope a chat with `SendMessageRequest.collection_ids` (per turn) or
 `ws://host/api/v1/ws/sessions/{session_id}`
 
 1. Connect **without** credentials in the URL.
-2. Send an auth frame within 10 s: `{"type":"auth","token":"<jwt>"}` or
-   `{"type":"auth","api_key":"<key>"}`.
-3. Receive `{"type":"auth_ok","data":{"user_id":"…"}}`, or an `error` frame followed by close
-   code 1008.
+2. Send an auth frame within 10 s: `{"type":"auth","token":"<jwt>","org_id":"<uuid>"?}` or
+   `{"type":"auth","api_key":"<key>"}` (`org_id` plays the role of `X-Org-Id`).
+3. Receive `{"type":"auth_ok","data":{"user_id":"…","org_id":"…"}}`, or an `error` frame
+   followed by close code 1008.
 
 Query-string credentials (`?token=` / `?api_key=`) are still accepted for older clients but are
 deprecated (they end up in access logs).
@@ -349,18 +511,25 @@ deprecated (they end up in access logs).
 Client → server:
 ```json
 {"type":"user_message","content":"hi","use_rag":true,"use_tools":false,"tool_names":null,
- "model":null,"collection_ids":null,"temperature":null}
+ "model":null,"collection_ids":null,"temperature":null,"max_tokens":null,
+ "edit_of":"<user message id>"?,"idempotency_key":"<uuid>"?}
 {"type":"approval","approval_id":"…","decision":"approve","tool_call_ids":null}
-{"type":"stop"}
+{"type":"regenerate","temperature":null,"max_tokens":null}
+{"type":"stop","generation_id":"…"?}
 {"type":"ping"}
 ```
 
-Server → client: the same event frames as the SSE stream, plus `auth_ok` and `pong`.
+Server → client: the same event frames as the SSE stream (each with `generation_id` and
+`seq`), plus `auth_ok` and `pong`. Only fields present in a `user_message` frame override the
+session assistant's defaults.
 
-- `stop` cancels the in-flight generation; the server persists the partial reply and still
-  sends `done` and `assistant_message` with `interrupted: true`.
-- A `user_message` while another generation is running → `{"type":"error","data":{"code":"busy"}}`.
-- Disconnecting mid-generation behaves like SSE: the partial reply is persisted.
+- `stop` ends the in-flight generation (the current one when `generation_id` is omitted); the
+  server persists the partial reply and still sends `done` and `assistant_message` with
+  `interrupted: true`.
+- A `user_message` / `approval` / `regenerate` while another generation is running →
+  `{"type":"error","data":{"code":"busy"}}`.
+- Disconnecting mid-generation does **not** stop it: reconnect and replay from
+  `GET /sessions/{id}/generations/{generation_id}/events?after=<seq>`.
 
 ---
 

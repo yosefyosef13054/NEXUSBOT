@@ -16,6 +16,7 @@ class DocumentRead(ORMBase):
     mime_type: str
     size_bytes: int
     status: DocumentStatus
+    org_id: UUID | None = None
     session_id: UUID | None = None
     collection_id: UUID | None = None
     source_url: str | None = None

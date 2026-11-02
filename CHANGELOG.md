@@ -3,6 +3,63 @@
 All notable changes to NexusBot are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic versioning.
 
+## [1.3.0] — Phase 3: product layer
+
+Workspaces, personas, budgets, feedback, long-term memory, conversation branching and
+streams that survive disconnects.
+
+### Added
+- **Organizations (workspaces) and roles.** Every user gets a personal org; shared orgs with
+  `owner` / `admin` / `member` roles, member management by email, and per-org settings
+  (monthly token / USD budgets, default model, allowed models). The active org is selected per
+  request with `X-Org-Id` (WebSocket: `org_id` in the auth frame); sessions, documents,
+  collections, assistants, memories and usage are scoped to it. Migration `0004` backfills a
+  personal org for existing users and re-homes their data.
+- **Usage and quotas.** `GET /usage/me` (month-to-date for user and org with remaining
+  budget), `GET /orgs/{id}/usage?group_by=user|model|day` for org admins, and
+  `GET /admin/usage` / `GET /admin/feedback` for server administrators. Exhausted budgets
+  refuse every generation path with **429 `quota_exceeded`** (`details.resets_at`), checked
+  against a short-lived cache that is kept current as turns are logged.
+- **Assistants (personas)** (`/assistants`): system prompt, model, tools, collections,
+  RAG / tool / memory defaults and an org-wide default; attach to sessions with
+  `assistant_id`. Request fields override assistant defaults field by field. Edit / delete is
+  limited to the creator or an org admin.
+- **Feedback.** Thumbs up / down with an optional comment per assistant message
+  (`POST/DELETE /sessions/{id}/messages/{mid}/feedback`), mirrored in `meta.feedback`.
+- **Long-term memory** (`/memories`): facts, preferences and standing instructions per user,
+  recalled by pgvector similarity into every turn (`meta.memories_used`) and extracted
+  automatically after turns by a small model call; near-duplicate detection, per-user cap,
+  user-level opt-out (`PATCH /auth/me {memory_enabled}`) and per-assistant switch.
+- **Conversation branching.** Messages form a tree (`parent_id`, `siblings {index, count}`,
+  `SessionRead.active_leaf_id`): editing a user message (`POST …/messages/{mid}/edit`, SSE)
+  and regenerating (`…/regenerate`, new `…/regenerate/stream`) create siblings instead of
+  overwriting; `GET …/messages/{mid}/siblings` and `POST /sessions/{id}/branch` switch
+  branches; history returns the active branch.
+- **Resumable streams and background turns.** Every streamed turn is written to a Redis
+  Streams log with a sequence number (SSE `id:`); generations run detached from the
+  connection. `GET /sessions/{id}/generations/{gid}/events?after=` (or `Last-Event-ID`)
+  replays missed frames and follows live, `GET …/generations/active` finds the in-flight
+  turn, `POST …/messages/background` (202) starts a turn without holding a connection, and
+  `POST …/generations/{gid}/stop` ends one explicitly (works across workers).
+- **Idempotency keys** (`Idempotency-Key` header) on message sends, streams, background
+  turns and edits: retries return the original turn instead of creating a duplicate.
+- **Eval harness** (`evals/`): JSONL datasets run through the real generation pipeline with
+  deterministic graders (`contains`, `regex`, `tool_called`, `citations_min`, …) and an
+  LLM judge, a CLI (`python -m evals.run --dataset … --fail-under 0.9 --out report.json`) and
+  a shipped smoke dataset; covered by tests against the fake model.
+
+### Changed
+- **Disconnecting a stream no longer cancels the generation.** Previously a dropped SSE /
+  WebSocket connection interrupted the model call and persisted a partial reply
+  (`interrupt_reason = "disconnect"`); now the turn completes in the background and the
+  client re-attaches. Stopping is explicit (`stop` frame / endpoint,
+  `interrupt_reason = "stop"`).
+- `regenerate` keeps the previous reply as a sibling branch instead of soft-deleting it.
+- `UserRead` gains `personal_org_id` and `memory_enabled`; `SessionRead`, `DocumentRead` and
+  `CollectionRead` gain `org_id`; `MessageRead` gains `parent_id` and `siblings`;
+  `assistant_message.meta.memories_used` is always present.
+- Full-text chat search is scoped to the active org.
+
 ## [1.2.0] — Phase 2: AI core
 
 Multi-provider models with real routing, a LangGraph agent with human-in-the-loop

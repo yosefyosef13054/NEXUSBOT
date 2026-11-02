@@ -125,6 +125,23 @@ class Settings(BaseSettings):
     TOOLS_REQUIRING_APPROVAL: List[str] = Field(default_factory=list)
     APPROVAL_TTL_MINUTES: int = 30
 
+    # ---- Workspaces / quotas ----
+    ORG_HEADER: str = "X-Org-Id"
+    # Month-to-date usage is cached briefly so quota checks don't scan the usage table per turn.
+    QUOTA_CACHE_SECONDS: int = 30
+
+    # ---- Memory ----
+    MEMORY_ENABLED: bool = True
+    MEMORY_TOP_K: int = 6
+    MEMORY_MAX_PER_USER: int = 500
+    # New memories this similar to an existing one are treated as duplicates.
+    MEMORY_DEDUP_SIMILARITY: float = 0.92
+
+    # ---- Resumable streams / idempotency ----
+    STREAM_EVENTS_TTL_SECONDS: int = 3600
+    STREAM_EVENTS_MAXLEN: int = 5000
+    IDEMPOTENCY_TTL_SECONDS: int = 86400
+
     # ---- Outbound web fetching (URL ingestion, fetch_url tool) ----
     WEB_FETCH_MAX_BYTES: int = 5 * 1024 * 1024
     WEB_FETCH_TIMEOUT_SECONDS: int = 20

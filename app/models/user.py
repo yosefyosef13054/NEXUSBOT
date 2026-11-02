@@ -26,6 +26,8 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Preferred chat model (validated against the registry); None = server default.
     default_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Opt-out for automatic memory extraction across all of the user's chats.
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     api_keys: Mapped[list[ApiKey]] = relationship(back_populates="user", cascade="all, delete-orphan")
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(

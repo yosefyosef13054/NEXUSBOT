@@ -21,6 +21,8 @@ def build_chat_prompt(
 
     Input variables at invoke time: `input`, `history`, `summary`, plus `context` when
     `use_rag` and `agent_scratchpad` (injected by the agent executor) when `use_tools`.
+    `memory_messages` is an optional list with one system message carrying what the
+    assistant remembers about the user (see `app.services.memory_service`).
     """
     parts: list[str] = [system_prompt or DEFAULT_ASSISTANT_V1]
     if use_rag:
@@ -33,6 +35,7 @@ def build_chat_prompt(
 
     messages: list = [
         ("system", "\n\n".join(parts)),
+        MessagesPlaceholder("memory_messages", optional=True),
         MessagesPlaceholder("history"),
         ("human", "{input}"),
     ]

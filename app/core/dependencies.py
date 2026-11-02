@@ -45,3 +45,61 @@ def require_role(*roles: str):
         return user
 
     return _checker
+
+
+# --------------------------------------------------------------------------- workspaces
+
+
+from dataclasses import dataclass  # noqa: E402
+
+from app.models.organization import Membership, Organization, OrgRole  # noqa: E402
+
+
+@dataclass
+class Principal:
+    """The authenticated user acting inside one organization."""
+
+    user: User
+    org: Organization
+    membership: Membership
+
+    @property
+    def user_id(self):
+        return self.user.id
+
+    @property
+    def org_id(self):
+        return self.org.id
+
+    @property
+    def role(self) -> OrgRole:
+        return self.membership.role
+
+
+async def current_principal(
+    request: Request,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Principal:
+    """Resolve the active organization from `X-Org-Id` (default: the personal workspace)."""
+    from app.services.org_service import resolve_active_org
+
+    org, membership = await resolve_active_org(db, user, request.headers.get(settings.ORG_HEADER))
+    request.state.org_id = str(org.id)
+    return Principal(user=user, org=org, membership=membership)
+
+
+def require_org_role(minimum: OrgRole):
+    async def _checker(principal: Principal = Depends(current_principal)) -> Principal:
+        from app.services.org_service import require_role
+
+        require_role(principal.membership, minimum)
+        return principal
+
+    return _checker
+
+
+async def server_admin(user: User = Depends(current_user)) -> User:
+    if user.role != "admin":
+        raise ForbiddenError("Server administrator role required")
+    return user

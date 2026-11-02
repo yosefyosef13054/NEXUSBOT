@@ -81,6 +81,9 @@ async def register_user(db: AsyncSession, payload: RegisterRequest) -> User:
     )
     db.add(user)
     await db.flush()
+    from app.services.org_service import ensure_personal_org
+
+    await ensure_personal_org(db, user)
     return user
 
 
@@ -225,9 +228,12 @@ async def update_profile(
     user: User,
     full_name: str | None = None,
     default_model: str | None | object = _UNSET,
+    memory_enabled: bool | None = None,
 ) -> User:
     if full_name is not None:
         user.full_name = full_name.strip() or None
+    if memory_enabled is not None:
+        user.memory_enabled = memory_enabled
     if default_model is not _UNSET:
         from app.ai.providers.registry import get_registry
 

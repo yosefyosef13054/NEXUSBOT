@@ -210,8 +210,9 @@ async def test_stop_event_interrupts_and_persists_partial(client, db, monkeypatc
     assert msg is not None and msg.meta["status"] == "interrupted" and msg.meta["interrupt_reason"] == "stop"
 
 
-async def test_consumer_close_cancels_model_and_persists_partial(client, db, monkeypatch):
-    """Simulates the SSE client disconnecting mid-stream."""
+async def test_consumer_close_does_not_stop_generation_and_can_be_resumed(client, db, monkeypatch):
+    """Simulates the SSE client disconnecting mid-stream: the turn keeps running detached
+    and the missed frames can be replayed from the generation log."""
     monkeypatch.setattr(settings, "AI_FAKE_DELAY_SECONDS", 0.01)
     acct = await register_and_login(client)
     sid = await _session(client, acct)
@@ -227,7 +228,19 @@ async def test_consumer_close_cancels_model_and_persists_partial(client, db, mon
         max_tokens=None,
     )
     events = await _collect_until(gen, stop_after_tokens=5, action="close", stop_event=None)
+    assert events[0]["type"] == "user_message"
+    generation_id = events[0]["data"]["generation_id"]
+    last_seq = events[-1]["seq"]
     assert events[-1]["type"] == "token"
+
+    # Re-attach after the "disconnect": only frames after `last_seq`, through to the end.
+    resumed = [evt async for evt in chat_service.follow_generation(generation_id, after=last_seq)]
+    assert resumed and all(e["seq"] > last_seq for e in resumed)
+    assert [e["seq"] for e in resumed] == sorted(e["seq"] for e in resumed)
+    final = resumed[-1]
+    assert final["type"] == "assistant_message" and final["data"]["interrupted"] is False
+    assert final["data"]["generation_id"] == generation_id
+    assert "You said:" in final["data"]["content"]
 
     rows = (
         (
@@ -240,13 +253,17 @@ async def test_consumer_close_cancels_model_and_persists_partial(client, db, mon
         .scalars()
         .all()
     )
-    assert len(rows) == 1
-    partial = rows[0]
-    assert partial.meta["status"] == "interrupted"
-    assert partial.meta["interrupt_reason"] == "disconnect"
-    assert 0 < len(partial.content) < len(LONG_INPUT)
+    assert len(rows) == 1 and rows[0].meta["status"] == "ok"
     usage = (await db.execute(select(AIUsageLog).where(AIUsageLog.session_id == UUID(sid)))).scalars().all()
-    assert any(u.operation == "chat_stream" and u.meta.get("status") == "interrupted" for u in usage)
+    assert any(u.operation == "chat_stream" and u.meta.get("status") == "ok" for u in usage)
+
+
+async def test_follow_unknown_generation_is_not_found():
+    from app.core.exceptions import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        async for _ in chat_service.follow_generation("does-not-exist"):
+            pass
 
 
 async def test_history_cursor_pagination(client):

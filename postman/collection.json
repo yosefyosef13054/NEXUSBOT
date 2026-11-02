@@ -3,7 +3,7 @@
     "name": "NexusBot",
     "_postman_id": "nexusbot-v1",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "NexusBot \u2014 production AI chatbot backend: multi-session chat, streaming, RAG, tools, JWT/API key auth."
+    "description": "NexusBot — production AI chatbot backend: multi-session chat, streaming, RAG, tools, JWT/API key auth."
   },
   "variable": [
     {
@@ -40,6 +40,30 @@
     },
     {
       "key": "approval_id",
+      "value": ""
+    },
+    {
+      "key": "org_id",
+      "value": ""
+    },
+    {
+      "key": "member_user_id",
+      "value": ""
+    },
+    {
+      "key": "assistant_id",
+      "value": ""
+    },
+    {
+      "key": "memory_id",
+      "value": ""
+    },
+    {
+      "key": "message_id",
+      "value": ""
+    },
+    {
+      "key": "generation_id",
       "value": ""
     }
   ],
@@ -673,6 +697,513 @@
           "request": {
             "method": "DELETE",
             "url": "{{baseUrl}}/collections/{{collection_id}}?delete_documents=false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Organizations",
+      "item": [
+        {
+          "name": "List my orgs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orgs"
+          }
+        },
+        {
+          "name": "Create org",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/orgs",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Team\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get org",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orgs/{{org_id}}"
+          }
+        },
+        {
+          "name": "Update org settings (budget, allowed models)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/orgs/{{org_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"settings\": {\n    \"budget_usd_per_month\": 25.0,\n    \"allowed_models\": null,\n    \"default_model\": null\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "List members",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orgs/{{org_id}}/members"
+          }
+        },
+        {
+          "name": "Add member by email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/orgs/{{org_id}}/members",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"teammate@example.com\",\n  \"role\": \"member\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Change member role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/orgs/{{org_id}}/members/{{member_user_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"admin\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Remove member",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/orgs/{{org_id}}/members/{{member_user_id}}"
+          }
+        },
+        {
+          "name": "Org usage report (admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orgs/{{org_id}}/usage?group_by=user"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Usage & Admin",
+      "item": [
+        {
+          "name": "My usage (active org)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/usage/me"
+          }
+        },
+        {
+          "name": "Platform usage (server admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/admin/usage?group_by=org"
+          }
+        },
+        {
+          "name": "Platform feedback (server admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/admin/feedback?page=1&page_size=50"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Assistants",
+      "item": [
+        {
+          "name": "List assistants",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/assistants"
+          }
+        },
+        {
+          "name": "Create assistant",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/assistants",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Support bot\",\n  \"avatar\": \"\\ud83e\\udd16\",\n  \"system_prompt\": \"You are a concise support assistant.\",\n  \"model\": null,\n  \"tool_names\": [\n    \"calculator\"\n  ],\n  \"use_rag\": true,\n  \"use_tools\": true,\n  \"temperature\": 0.3,\n  \"memory_enabled\": true,\n  \"is_default\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "Get assistant",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/assistants/{{assistant_id}}"
+          }
+        },
+        {
+          "name": "Update assistant",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/assistants/{{assistant_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"is_default\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete assistant",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/assistants/{{assistant_id}}"
+          }
+        },
+        {
+          "name": "Create session with assistant",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Org-Id",
+                "value": "{{org_id}}"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assistant_id\": \"{{assistant_id}}\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Memory",
+      "item": [
+        {
+          "name": "List memories",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/memories?page=1&page_size=50"
+          }
+        },
+        {
+          "name": "Add memory",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/memories",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Prefers answers in bullet points\",\n  \"kind\": \"preference\",\n  \"importance\": 3\n}"
+            }
+          }
+        },
+        {
+          "name": "Update memory",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/memories/{{memory_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"importance\": 5\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete memory",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/memories/{{memory_id}}"
+          }
+        },
+        {
+          "name": "Clear all memories",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/memories"
+          }
+        },
+        {
+          "name": "Opt out of memory",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/me",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"memory_enabled\": false\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Branching & Feedback",
+      "item": [
+        {
+          "name": "Edit user message (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/{{message_id}}/edit",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Edited question\",\n  \"use_rag\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "Regenerate (stream)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/regenerate/stream",
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            }
+          }
+        },
+        {
+          "name": "Message siblings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/{{message_id}}/siblings"
+          }
+        },
+        {
+          "name": "Switch branch",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/branch",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"leaf_message_id\": \"{{message_id}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Rate reply",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/{{message_id}}/feedback",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rating\": 1,\n  \"comment\": null\n}"
+            }
+          }
+        },
+        {
+          "name": "Remove rating",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/{{message_id}}/feedback"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Generations (resume, background, stop)",
+      "item": [
+        {
+          "name": "Send in background (202)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages/background",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Write a long answer\",\n  \"use_rag\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "Active generation",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/generations/active"
+          }
+        },
+        {
+          "name": "Replay / follow generation events (SSE)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/generations/{{generation_id}}/events?after=0"
+          }
+        },
+        {
+          "name": "Stop generation",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/generations/{{generation_id}}/stop"
+          }
+        },
+        {
+          "name": "Send message (idempotent)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"hello\",\n  \"use_rag\": false\n}"
+            }
           }
         }
       ]

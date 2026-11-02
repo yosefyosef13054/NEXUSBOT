@@ -28,6 +28,22 @@ class ChatSession(Base):
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    # Workspace the chat was started in (sessions stay private to their user).
+    org_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    # Persona whose settings (prompt, model, tools, scope) are the defaults for every turn.
+    assistant_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assistants.id", ondelete="SET NULL"), nullable=True
+    )
+    # Leaf of the active branch of the message tree (None = latest message).
+    active_leaf_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "chat_messages.id", ondelete="SET NULL", use_alter=True, name="fk_chat_sessions_active_leaf"
+        ),
+        nullable=True,
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="New chat")
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -41,6 +57,7 @@ class ChatSession(Base):
         back_populates="session",
         cascade="all, delete-orphan",
         order_by="ChatMessage.created_at.asc()",
+        foreign_keys="ChatMessage.session_id",
     )
 
 
@@ -66,6 +83,12 @@ class ChatMessage(Base):
     # Optional structured info: tool calls, citations, model, latency, status, approval.
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    session: Mapped[ChatSession] = relationship(back_populates="messages")
+    # Message tree: user messages branch on edits, assistant messages on regenerations.
+    # Tool messages point at the user message of their turn.
+    parent_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    session: Mapped[ChatSession] = relationship(back_populates="messages", foreign_keys=[session_id])
 
     __table_args__ = (Index("ix_chat_messages_content_tsv", "content_tsv", postgresql_using="gin"),)

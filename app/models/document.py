@@ -30,6 +30,9 @@ class Document(Base):
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    org_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True, nullable=True
+    )
     # Optional scoping: documents can belong to a session (per-chat KB) or to the user globally.
     session_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),

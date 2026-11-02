@@ -24,6 +24,9 @@ class AIUsageLog(Base):
         index=True,
         nullable=True,
     )
+    org_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     provider: Mapped[str] = mapped_column(String(32), nullable=False, default="openai")
     model: Mapped[str] = mapped_column(String(64), nullable=False)
     operation: Mapped[str] = mapped_column(String(32), nullable=False)  # chat | embedding | tool

@@ -14,6 +14,7 @@ class SessionCreateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     system_prompt: str | None = None
     model: str | None = Field(default=None, max_length=64)
+    assistant_id: UUID | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -21,11 +22,15 @@ class SessionUpdateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     system_prompt: str | None = None
     model: str | None = Field(default=None, max_length=64)
+    assistant_id: UUID | None = None
     meta: dict[str, Any] | None = None
 
 
 class SessionRead(ORMBase):
     id: UUID
+    org_id: UUID | None = None
+    assistant_id: UUID | None = None
+    active_leaf_id: UUID | None = None
     title: str
     model: str | None = None
     system_prompt: str | None = None
@@ -35,14 +40,42 @@ class SessionRead(ORMBase):
     updated_at: datetime
 
 
+class SiblingInfo(BaseModel):
+    index: int
+    count: int
+
+
 class MessageRead(ORMBase):
     id: UUID
     session_id: UUID
+    parent_id: UUID | None = None
     role: MessageRole
     content: str
     tokens: int
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    # Set by history/sibling endpoints when the message has edit/regeneration siblings.
+    siblings: SiblingInfo | None = None
+
+
+class BranchRequest(BaseModel):
+    leaf_message_id: UUID
+
+
+class SiblingsResponse(BaseModel):
+    items: List[MessageRead]
+    active_index: int = 0
+
+
+class BackgroundSendResponse(BaseModel):
+    generation_id: str
+    user_message: MessageRead
+
+
+class GenerationActiveResponse(BaseModel):
+    generation_id: str
+    started_at: datetime
+    status: str
 
 
 class SendMessageRequest(BaseModel):

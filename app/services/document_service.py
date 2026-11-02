@@ -8,14 +8,16 @@ from uuid import UUID
 
 import aiofiles
 from fastapi import UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logger import get_logger
 from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.models.organization import Membership, OrgRole
 from app.services.collection_service import ensure_collections
+from app.services.org_service import has_role
 from app.utils.files import is_valid_docx, safe_filename, sha256_file_async, sniff_mime, storage_path_for
 from app.utils.web import UnsafeUrlError, fetch_url_safely
 
@@ -58,9 +60,11 @@ async def _discard(path: Path) -> None:
     await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
 
 
-async def _validate_collection(db: AsyncSession, *, user_id: UUID, collection_id: UUID | None) -> None:
+async def _validate_collection(
+    db: AsyncSession, *, user_id: UUID, collection_id: UUID | None, org_id: UUID | None = None
+) -> None:
     if collection_id is not None:
-        await ensure_collections(db, user_id=user_id, ids=[collection_id])
+        await ensure_collections(db, ids=[collection_id], org_id=org_id, user_id=user_id)
 
 
 async def _register(
@@ -75,6 +79,7 @@ async def _register(
     ext: str,
     name: str,
     source_url: str | None = None,
+    org_id: UUID | None = None,
 ) -> tuple[Document, bool]:
     """Validate stored bytes, dedupe by hash and create the Document row."""
     if size == 0:
@@ -106,6 +111,7 @@ async def _register(
 
     doc = Document(
         user_id=user_id,
+        org_id=org_id,
         session_id=session_id,
         collection_id=collection_id,
         name=name[:512],
@@ -130,6 +136,7 @@ async def upload_document(
     file: UploadFile,
     session_id: UUID | None,
     collection_id: UUID | None = None,
+    org_id: UUID | None = None,
 ) -> tuple[Document, bool]:
     """Store an upload and create its Document row.
 
@@ -137,7 +144,7 @@ async def upload_document(
     already exists for this user and scope; the caller should not enqueue ingestion.
     The client-supplied content type is ignored — the bytes are sniffed instead.
     """
-    await _validate_collection(db, user_id=user_id, collection_id=collection_id)
+    await _validate_collection(db, user_id=user_id, collection_id=collection_id, org_id=org_id)
     ext = _extension_of(file.filename)
     dest = storage_path_for(str(user_id), file.filename or f"upload{ext}")
     try:
@@ -155,6 +162,7 @@ async def upload_document(
         head=head,
         ext=ext,
         name=file.filename or dest.name,
+        org_id=org_id,
     )
 
 
@@ -165,9 +173,10 @@ async def ingest_from_url(
     url: str,
     session_id: UUID | None,
     collection_id: UUID | None = None,
+    org_id: UUID | None = None,
 ) -> tuple[Document, bool]:
     """Download a public web page / PDF / text resource and register it like an upload."""
-    await _validate_collection(db, user_id=user_id, collection_id=collection_id)
+    await _validate_collection(db, user_id=user_id, collection_id=collection_id, org_id=org_id)
     try:
         resource = await fetch_url_safely(url)
     except UnsafeUrlError as e:
@@ -208,6 +217,7 @@ async def ingest_from_url(
         ext=ext,
         name=display_name,
         source_url=resource.final_url,
+        org_id=org_id,
     )
 
 
@@ -218,8 +228,16 @@ async def list_documents(
     page: int,
     page_size: int,
     collection_id: UUID | None = None,
+    org_id: UUID | None = None,
 ) -> tuple[list[Document], int]:
-    base = select(Document).where(Document.user_id == user_id, Document.deleted_at.is_(None))
+    """Own documents plus every document shared through one of the org's collections."""
+    base = select(Document).where(Document.deleted_at.is_(None))
+    if org_id is not None:
+        base = base.where(
+            Document.org_id == org_id, or_(Document.user_id == user_id, Document.collection_id.is_not(None))
+        )
+    else:
+        base = base.where(Document.user_id == user_id)
     if collection_id is not None:
         base = base.where(Document.collection_id == collection_id)
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
@@ -235,11 +253,31 @@ async def list_documents(
     return list(rows), int(total)
 
 
-async def get_document(db: AsyncSession, *, user_id: UUID, document_id: UUID) -> Document:
+async def get_document(
+    db: AsyncSession, *, user_id: UUID, document_id: UUID, org_id: UUID | None = None
+) -> Document:
     obj = await db.get(Document, document_id)
-    if obj is None or obj.user_id != user_id or obj.deleted_at is not None:
+    if obj is None or obj.deleted_at is not None:
         raise NotFoundError("Document not found")
-    return obj
+    if obj.user_id == user_id:
+        return obj
+    if org_id is not None and obj.org_id == org_id and obj.collection_id is not None:
+        return obj  # shared through a collection of the active organization
+    raise NotFoundError("Document not found")
+
+
+async def owned_document(
+    db: AsyncSession, *, user_id: UUID, document_id: UUID, membership: Membership | None = None
+) -> Document:
+    """Documents can be changed by their uploader or an admin of their organization."""
+    obj = await db.get(Document, document_id)
+    if obj is None or obj.deleted_at is not None:
+        raise NotFoundError("Document not found")
+    if obj.user_id == user_id:
+        return obj
+    if membership is not None and obj.org_id == membership.org_id and has_role(membership, OrgRole.ADMIN):
+        return obj
+    raise NotFoundError("Document not found")
 
 
 _UNSET = object()
@@ -252,13 +290,14 @@ async def update_document(
     document_id: UUID,
     name: str | None = None,
     collection_id: UUID | None | object = _UNSET,
+    membership: Membership | None = None,
 ) -> Document:
-    obj = await get_document(db, user_id=user_id, document_id=document_id)
+    obj = await owned_document(db, user_id=user_id, document_id=document_id, membership=membership)
     if name is not None:
         obj.name = name.strip()[:512]
     if collection_id is not _UNSET:
         cid = collection_id if isinstance(collection_id, UUID) else None
-        await _validate_collection(db, user_id=user_id, collection_id=cid)
+        await _validate_collection(db, user_id=user_id, collection_id=cid, org_id=obj.org_id)
         obj.collection_id = cid
     await db.flush()
     await db.commit()
@@ -267,9 +306,15 @@ async def update_document(
 
 
 async def list_chunks(
-    db: AsyncSession, *, user_id: UUID, document_id: UUID, page: int, page_size: int
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    document_id: UUID,
+    page: int,
+    page_size: int,
+    org_id: UUID | None = None,
 ) -> tuple[list[DocumentChunk], int]:
-    await get_document(db, user_id=user_id, document_id=document_id)
+    await get_document(db, user_id=user_id, document_id=document_id, org_id=org_id)
     base = select(DocumentChunk).where(DocumentChunk.document_id == document_id)
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
@@ -284,16 +329,20 @@ async def list_chunks(
     return list(rows), int(total)
 
 
-async def get_chunk(db: AsyncSession, *, user_id: UUID, document_id: UUID, chunk_id: UUID) -> DocumentChunk:
-    await get_document(db, user_id=user_id, document_id=document_id)
+async def get_chunk(
+    db: AsyncSession, *, user_id: UUID, document_id: UUID, chunk_id: UUID, org_id: UUID | None = None
+) -> DocumentChunk:
+    await get_document(db, user_id=user_id, document_id=document_id, org_id=org_id)
     chunk = await db.get(DocumentChunk, chunk_id)
     if chunk is None or chunk.document_id != document_id:
         raise NotFoundError("Chunk not found")
     return chunk
 
 
-async def soft_delete_document(db: AsyncSession, *, user_id: UUID, document_id: UUID) -> None:
-    obj = await get_document(db, user_id=user_id, document_id=document_id)
+async def soft_delete_document(
+    db: AsyncSession, *, user_id: UUID, document_id: UUID, membership: Membership | None = None
+) -> None:
+    obj = await owned_document(db, user_id=user_id, document_id=document_id, membership=membership)
     obj.deleted_at = datetime.now(UTC)
     await db.flush()
     await db.commit()

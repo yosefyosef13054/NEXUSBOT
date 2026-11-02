@@ -22,6 +22,7 @@ async def log_ai_usage(
     latency_ms: int = 0,
     provider: str = "openai",
     meta: dict | None = None,
+    org_id: UUID | None = None,
 ) -> AIUsageLog:
     """Record one model call (chat, agent, embedding) with an estimated cost.
 
@@ -33,6 +34,7 @@ async def log_ai_usage(
     cost = estimate_cost(model_name, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
     row = AIUsageLog(
         user_id=user_id,
+        org_id=org_id,
         session_id=session_id,
         provider=provider,
         model=model_name,

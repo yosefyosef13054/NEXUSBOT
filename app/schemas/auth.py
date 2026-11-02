@@ -42,6 +42,8 @@ class UserRead(ORMBase):
     is_active: bool
     last_login_at: datetime | None = None
     default_model: str | None = None
+    memory_enabled: bool = True
+    personal_org_id: UUID | None = None
     created_at: datetime
 
 
@@ -49,6 +51,7 @@ class ProfileUpdateRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=255)
     # Explicit null clears the preference (server default applies).
     default_model: str | None = Field(default=None, max_length=64)
+    memory_enabled: bool | None = None
     model_config = {"extra": "forbid"}
 
 

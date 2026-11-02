@@ -424,3 +424,69 @@ Rendering tips:
   with `GET /documents/{document_id}/chunks/{chunk_id}` to show the source span.
 - After an app restart, `GET /sessions/{id}/approvals?status=pending` tells you which turns
   are still waiting for a decision.
+
+---
+
+## 10. Workspaces, assistants, memory, branching and resumable streams (Phase 3)
+
+### Active workspace
+Every request acts inside one organization. Keep the chosen org id in local prefs and send it
+as `X-Org-Id` on every request (SSE included); for WebSocket put `"org_id"` in the `auth`
+frame. Switching org must invalidate sessions, documents, collections, assistants and usage.
+
+```dart
+api.dio.options.headers['X-Org-Id'] = activeOrgId;         // null → personal org
+final orgs = (await api.dio.get('/orgs')).data['items'];     // {id, name, role, member_count, settings}
+```
+
+### Quotas
+Any generation request can fail with **429** `quota_exceeded` when the org budget is spent.
+Show a banner and disable the composer until `details.resets_at`; `GET /usage/me` returns
+month-to-date usage and the remaining budget for the banner / settings screen.
+
+### Assistants
+`GET /assistants` for the "new chat" picker (preselect `is_default`); create sessions with
+`{'assistant_id': id}`. Per-turn request fields still override the assistant's defaults.
+
+### Feedback and memory
+```dart
+await api.dio.post('/sessions/$sid/messages/$mid/feedback', data: {'rating': -1, 'comment': 'wrong year'});
+await api.dio.delete('/sessions/$sid/messages/$mid/feedback');
+final memories = (await api.dio.get('/memories')).data['items'];      // Memory screen
+await api.dio.patch('/auth/me', data: {'memory_enabled': false});     // opt-out toggle
+```
+`assistant_message.meta.memories_used` lists the memory ids a reply drew on.
+
+### Branching
+`MessageRead` carries `parent_id` and `siblings {index, count}`; history is the active branch.
+
+```dart
+// Edit: same frames as /messages/stream; the new branch becomes active.
+api.dio.post<ResponseBody>('/sessions/$sid/messages/$mid/edit', data: {'content': edited}, ...);
+// "‹ 2/3 ›" switcher: list the alternatives, then make one active.
+final sibs = (await api.dio.get('/sessions/$sid/messages/$mid/siblings')).data;   // {items, active_index}
+final branch = (await api.dio.post('/sessions/$sid/branch', data: {'leaf_message_id': chosenId})).data; // HistoryResponse
+// Regenerate keeps the old reply as a sibling:
+api.dio.post<ResponseBody>('/sessions/$sid/messages/regenerate/stream', data: {}, ...);
+```
+
+### Resumable streams, background turns, idempotency
+Each SSE frame now has an `id:` line (the sequence number) and every event carries
+`generation_id`. Extend the SSE parser from section 4 to keep the last id:
+
+```dart
+// in sseFrames(): track `id:` lines alongside `data:` lines
+if (line.startsWith('id:')) lastEventId = int.parse(line.substring(3).trim());
+```
+
+- Reconnect after a drop: `GET /sessions/$sid/generations/$gid/events` with header
+  `Last-Event-ID: $lastEventId` (or `?after=`) replays the missed frames and follows live.
+- When a chat opens: `GET /sessions/$sid/generations/active` → attach if a turn is running.
+- Going to background on mobile: start turns with `POST /sessions/$sid/messages/background`
+  (202 `{generation_id, user_message}`) and attach with the events endpoint; the reply is
+  produced even if the app is suspended.
+- Stop explicitly with `POST /sessions/$sid/generations/$gid/stop` (or the WS `stop` frame).
+  Closing the connection no longer stops the turn.
+- Send `Idempotency-Key: <uuid>` (one per attempt, reused on retries) on `/messages`,
+  `/messages/stream`, `/messages/background` and `/messages/{id}/edit`: a retry replays the
+  original turn instead of creating a duplicate.

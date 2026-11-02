@@ -35,6 +35,8 @@ _TEST_ENV = {
     # Fake embeddings are random per string: tests query with the exact chunk text, which
     # only matches when no contextual header is prepended before embedding.
     "RAG_CONTEXT_HEADERS": "false",
+    # Memory extraction runs an extra LLM call after each turn; tests enable it explicitly.
+    "MEMORY_ENABLED": "false",
 }
 for _k, _v in _TEST_ENV.items():
     os.environ.setdefault(_k, _v)
@@ -51,6 +53,8 @@ INTEGRATION_TABLES = (
     "checkpoint_writes",
     "checkpoint_blobs",
     "checkpoints",
+    "message_feedback",
+    "memories",
     "approvals",
     "tool_calls",
     "ai_usage_logs",
@@ -59,6 +63,9 @@ INTEGRATION_TABLES = (
     "collections",
     "chat_messages",
     "chat_sessions",
+    "assistants",
+    "memberships",
+    "organizations",
     "refresh_tokens",
     "api_keys",
     "users",

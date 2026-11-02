@@ -106,9 +106,25 @@ async def _wait_for_assistant(base: str, acct: dict, *, timeout: float = 10) -> 
     return None
 
 
-async def test_sse_client_disconnect_persists_partial_reply(live_server):
+def _parse_sse(lines: list[str]) -> list[tuple[int | None, dict]]:
+    """(id, event) pairs from raw SSE lines."""
+    out: list[tuple[int | None, dict]] = []
+    current_id: int | None = None
+    for line in lines:
+        if line.startswith("id:"):
+            current_id = int(line[3:].strip())
+        elif line.startswith("data:"):
+            out.append((current_id, json.loads(line[5:])))
+        elif not line.strip():
+            current_id = None
+    return out
+
+
+async def test_sse_client_disconnect_then_resume_via_generation_events(live_server):
+    """Dropping the SSE connection no longer cancels the turn: the client re-attaches with
+    `Last-Event-ID` and receives exactly the frames it missed."""
     acct = await _account(live_server)
-    seen = 0
+    seen: list[tuple[int | None, dict]] = []
     async with httpx.AsyncClient(base_url=live_server, timeout=30, trust_env=False) as c:
         async with c.stream(
             "POST",
@@ -117,15 +133,80 @@ async def test_sse_client_disconnect_persists_partial_reply(live_server):
             headers={**acct["headers"], "Accept": "text/event-stream"},
         ) as r:
             assert r.status_code == 200
+            buffer: list[str] = []
             async for line in r.aiter_lines():
-                if line.startswith("data:") and json.loads(line[5:])["type"] == "token":
-                    seen += 1
-                    if seen >= 5:
-                        break  # closes the connection on exit of the context manager
+                buffer.append(line)
+                seen = _parse_sse(buffer)
+                if sum(1 for _, e in seen if e["type"] == "token") >= 5:
+                    break  # closes the connection on exit of the context manager
+    first_id, first = seen[0]
+    assert first["type"] == "user_message" and first_id == 1
+    generation_id = first["data"]["generation_id"]
+    last_id = seen[-1][0]
+    assert last_id is not None and last_id >= 6
+
+    async with httpx.AsyncClient(base_url=live_server, timeout=30, trust_env=False) as c:
+        active = await c.get(
+            f"/api/v1/sessions/{acct['session_id']}/generations/active", headers=acct["headers"]
+        )
+        assert active.status_code == 200
+        assert active.json() is None or active.json()["generation_id"] == generation_id
+
+        async with c.stream(
+            "GET",
+            f"/api/v1/sessions/{acct['session_id']}/generations/{generation_id}/events",
+            headers={**acct["headers"], "Accept": "text/event-stream", "Last-Event-ID": str(last_id)},
+        ) as r:
+            assert r.status_code == 200
+            resumed = _parse_sse([line async for line in r.aiter_lines()])
+    ids = [i for i, _ in resumed]
+    assert ids and ids[0] == last_id + 1 and ids == sorted(ids)
+    final = resumed[-1][1]
+    assert final["type"] == "assistant_message" and final["data"]["interrupted"] is False
+    assert final["data"]["generation_id"] == generation_id
+
     msg = await _wait_for_assistant(live_server, acct)
-    assert msg is not None, "partial reply was not persisted after disconnect"
-    assert msg["meta"]["status"] == "interrupted"
-    assert msg["meta"]["interrupt_reason"] == "disconnect"
+    assert msg is not None and msg["meta"]["status"] == "ok"
+    assert "You said:" in msg["content"]
+
+    async with httpx.AsyncClient(base_url=live_server, timeout=30, trust_env=False) as c:
+        active = await c.get(
+            f"/api/v1/sessions/{acct['session_id']}/generations/active", headers=acct["headers"]
+        )
+        assert active.json() is None
+        r = await c.get(
+            f"/api/v1/sessions/{acct['session_id']}/generations/nope/events", headers=acct["headers"]
+        )
+        assert r.status_code == 404
+
+
+async def test_sse_disconnect_then_stop_endpoint_persists_partial_reply(live_server):
+    acct = await _account(live_server)
+    generation_id = None
+    async with httpx.AsyncClient(base_url=live_server, timeout=30, trust_env=False) as c:
+        async with c.stream(
+            "POST",
+            f"/api/v1/sessions/{acct['session_id']}/messages/stream",
+            json={"content": LONG_INPUT, "use_rag": False},
+            headers={**acct["headers"], "Accept": "text/event-stream"},
+        ) as r:
+            tokens = 0
+            async for line in r.aiter_lines():
+                if line.startswith("data:"):
+                    evt = json.loads(line[5:])
+                    if evt["type"] == "user_message":
+                        generation_id = evt["data"]["generation_id"]
+                    elif evt["type"] == "token":
+                        tokens += 1
+                        if tokens >= 3:
+                            break
+        r = await c.post(
+            f"/api/v1/sessions/{acct['session_id']}/generations/{generation_id}/stop", headers=acct["headers"]
+        )
+        assert r.status_code == 200, r.text
+    msg = await _wait_for_assistant(live_server, acct)
+    assert msg is not None, "partial reply was not persisted after stop"
+    assert msg["meta"]["status"] == "interrupted" and msg["meta"]["interrupt_reason"] == "stop"
     assert 0 < len(msg["content"]) < len(LONG_INPUT)
 
 

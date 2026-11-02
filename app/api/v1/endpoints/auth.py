@@ -23,7 +23,7 @@ from app.schemas.auth import (
     UserRead,
 )
 from app.schemas.common import OkResponse
-from app.services import auth_service
+from app.services import auth_service, org_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -44,7 +44,7 @@ def _client_meta(request: Request) -> dict:
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
     user = await auth_service.register_user(db, payload)
     await db.commit()
-    return user
+    return await _user_read(db, user)
 
 
 @router.post(
@@ -91,9 +91,17 @@ async def logout_all(user: User = Depends(current_user), db: AsyncSession = Depe
     return OkResponse(message=f"Signed out of {count} session(s)")
 
 
+async def _user_read(db: AsyncSession, user: User) -> UserRead:
+    org = await org_service.ensure_personal_org(db, user)
+    await db.commit()
+    data = UserRead.model_validate(user).model_dump()
+    data["personal_org_id"] = org.id
+    return UserRead(**data)
+
+
 @router.get("/me", response_model=UserRead)
-async def me(user: User = Depends(current_user)):
-    return user
+async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return await _user_read(db, user)
 
 
 @router.patch("/me", response_model=UserRead)
@@ -102,12 +110,12 @@ async def update_me(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    kwargs: dict = {"full_name": payload.full_name}
+    kwargs: dict = {"full_name": payload.full_name, "memory_enabled": payload.memory_enabled}
     if "default_model" in payload.model_fields_set:
         kwargs["default_model"] = payload.default_model
     user = await auth_service.update_profile(db, user=user, **kwargs)
     await db.commit()
-    return user
+    return await _user_read(db, user)
 
 
 @router.post(
