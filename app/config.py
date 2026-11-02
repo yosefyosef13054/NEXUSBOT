@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import warnings
 from functools import lru_cache
-from typing import List, Literal
+from typing import Any, List, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_INSECURE_SECRETS = {"", "change-me", "changeme", "secret", "dev", "test"}
 
 
 class Settings(BaseSettings):
@@ -24,7 +28,7 @@ class Settings(BaseSettings):
 
     # ---- App ----
     APP_NAME: str = "NexusBot"
-    APP_ENV: Literal["development", "staging", "production"] = "development"
+    APP_ENV: Literal["development", "staging", "production", "test"] = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
     APP_DEBUG: bool = True
@@ -34,8 +38,11 @@ class Settings(BaseSettings):
     # ---- Security ----
     JWT_SECRET_KEY: str = "change-me"
     JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+    # A refresh token presented again within this window (e.g. a mobile client retrying a
+    # request that timed out) is treated as the same rotation, not as token theft.
+    REFRESH_TOKEN_REUSE_GRACE_SECONDS: int = 15
     API_KEY_HEADER: str = "X-API-Key"
 
     # ---- Database ----
@@ -52,6 +59,14 @@ class Settings(BaseSettings):
     OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     OPENAI_EMBEDDING_DIM: int = 1536
+    # Run the whole stack without any provider key: deterministic fake LLM + embeddings.
+    # Used by the test-suite and for local UI development.
+    AI_FAKE_MODE: bool = False
+    # Per-token delay of the fake model (lets tests exercise stop/disconnect mid-stream).
+    AI_FAKE_DELAY_SECONDS: float = 0.0
+    EMBEDDING_BATCH_SIZE: int = 64
+    # Per-1K-token USD prices: {"model": [input, output]}. Merged over the built-in table.
+    MODEL_PRICING: dict[str, list[float]] = Field(default_factory=dict)
 
     # ---- LangChain / tracing ----
     LANGCHAIN_TRACING_V2: bool = False
@@ -77,30 +92,87 @@ class Settings(BaseSettings):
     CHAT_SUMMARY_TRIGGER_TOKENS: int = 3000
     CHAT_RESPONSE_MAX_TOKENS: int = 1024
     CHAT_TEMPERATURE: float = 0.4
+    # Hard cap on how long a single generation may run before it is cancelled.
+    GENERATION_TIMEOUT_SECONDS: int = 180
 
     # ---- Rate limiting ----
     RATE_LIMIT_PER_MINUTE: int = 60
+    AUTH_RATE_LIMIT_PER_MINUTE: int = 10
 
     # ---- Storage ----
     UPLOAD_DIR: str = "/data/uploads"
     MAX_UPLOAD_MB: int = 25
+    ALLOWED_UPLOAD_EXTENSIONS: List[str] = Field(
+        default_factory=lambda: [
+            ".pdf",
+            ".docx",
+            ".md",
+            ".markdown",
+            ".txt",
+            ".html",
+            ".htm",
+            ".csv",
+            ".json",
+            ".log",
+        ]
+    )
+
+    # ---- Background work ----
+    # When true, post-turn maintenance (titles, summaries) runs inline instead of in a
+    # background task. Only useful for deterministic tests.
+    BACKGROUND_TASKS_INLINE: bool = False
 
     # ---- Observability ----
     SENTRY_DSN: str = ""
     LOG_LEVEL: str = "INFO"
+    METRICS_ENABLED: bool = True
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @field_validator("ALLOWED_ORIGINS", "ALLOWED_UPLOAD_EXTENSIONS", mode="before")
     @classmethod
-    def split_origins(cls, v):
+    def split_csv(cls, v: Any):
         if isinstance(v, str):
-            if v.strip() == "*":
+            s = v.strip()
+            if s == "*":
                 return ["*"]
-            return [o.strip() for o in v.split(",") if o.strip()]
+            if s.startswith("["):
+                return json.loads(s)
+            return [o.strip() for o in s.split(",") if o.strip()]
         return v
+
+    @field_validator("MODEL_PRICING", mode="before")
+    @classmethod
+    def parse_pricing(cls, v: Any):
+        if isinstance(v, str):
+            return json.loads(v) if v.strip() else {}
+        return v
+
+    @model_validator(mode="after")
+    def guard_production(self) -> Settings:
+        insecure = self.JWT_SECRET_KEY.strip().lower() in _INSECURE_SECRETS or len(self.JWT_SECRET_KEY) < 32
+        if self.is_production:
+            if insecure:
+                raise ValueError(
+                    "JWT_SECRET_KEY must be a random string of at least 32 characters in production. "
+                    "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+                )
+            if self.APP_DEBUG:
+                warnings.warn("APP_DEBUG=true in production; forcing it off.", stacklevel=2)
+                object.__setattr__(self, "APP_DEBUG", False)
+        elif insecure:
+            warnings.warn(
+                "JWT_SECRET_KEY is insecure; fine for development, refused in production.",
+                stacklevel=2,
+            )
+        return self
 
     @property
     def is_production(self) -> bool:
         return self.APP_ENV == "production"
+
+    @property
+    def cors_allow_credentials(self) -> bool:
+        # Browsers reject `Access-Control-Allow-Origin: *` together with credentials.
+        return self.ALLOWED_ORIGINS != ["*"]
 
 
 @lru_cache

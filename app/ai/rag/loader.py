@@ -7,21 +7,16 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,
     PyPDFLoader,
     TextLoader,
-    UnstructuredMarkdownLoader,
 )
 from langchain_core.documents import Document as LCDocument
 
-
+# Markdown, CSV, JSON and logs are loaded as plain text: the recursive splitter handles
+# their structure well enough, and it keeps the heavyweight `unstructured` dependency out.
 _EXT_LOADERS = {
     ".pdf": PyPDFLoader,
     ".docx": Docx2txtLoader,
-    ".md": UnstructuredMarkdownLoader,
     ".html": BSHTMLLoader,
     ".htm": BSHTMLLoader,
-    ".txt": TextLoader,
-    ".log": TextLoader,
-    ".csv": TextLoader,
-    ".json": TextLoader,
 }
 
 
@@ -31,6 +26,9 @@ def load_file_as_documents(path: Path) -> list[LCDocument]:
     Adding a new format = a single new entry in `_EXT_LOADERS`.
     """
     suffix = path.suffix.lower()
-    loader_cls = _EXT_LOADERS.get(suffix, TextLoader)
-    loader = loader_cls(str(path)) if loader_cls is not TextLoader else TextLoader(str(path), autodetect_encoding=True)
+    loader_cls = _EXT_LOADERS.get(suffix)
+    if loader_cls is None:
+        loader = TextLoader(str(path), autodetect_encoding=True)
+    else:
+        loader = loader_cls(str(path))
     return loader.load()

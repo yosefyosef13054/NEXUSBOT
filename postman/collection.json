@@ -3,19 +3,47 @@
     "name": "NexusBot",
     "_postman_id": "nexusbot-v1",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "NexusBot — production AI chatbot backend: multi-session chat, streaming, RAG, tools, JWT/API key auth."
+    "description": "NexusBot \u2014 production AI chatbot backend: multi-session chat, streaming, RAG, tools, JWT/API key auth."
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8000/api/v1" },
-    { "key": "access_token", "value": "" },
-    { "key": "refresh_token", "value": "" },
-    { "key": "api_key", "value": "" },
-    { "key": "session_id", "value": "" },
-    { "key": "document_id", "value": "" }
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/v1"
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "refresh_token",
+      "value": ""
+    },
+    {
+      "key": "api_key",
+      "value": ""
+    },
+    {
+      "key": "session_id",
+      "value": ""
+    },
+    {
+      "key": "document_id",
+      "value": ""
+    },
+    {
+      "key": "api_key_id",
+      "value": ""
+    }
   ],
   "auth": {
     "type": "bearer",
-    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
   },
   "item": [
     {
@@ -25,7 +53,12 @@
           "name": "Register",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/auth/register",
             "body": {
               "mode": "raw",
@@ -35,17 +68,27 @@
         },
         {
           "name": "Login",
-          "event": [{
-            "listen": "test",
-            "script": { "exec": [
-              "const json = pm.response.json();",
-              "pm.collectionVariables.set('access_token', json.access_token);",
-              "pm.collectionVariables.set('refresh_token', json.refresh_token);"
-            ], "type": "text/javascript" }
-          }],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', json.access_token);",
+                  "pm.collectionVariables.set('refresh_token', json.refresh_token);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/auth/login",
             "body": {
               "mode": "raw",
@@ -57,7 +100,12 @@
           "name": "Refresh",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/auth/refresh",
             "body": {
               "mode": "raw",
@@ -67,15 +115,110 @@
         },
         {
           "name": "Me",
-          "request": { "method": "GET", "url": "{{baseUrl}}/auth/me" }
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/auth/me"
+          }
         },
         {
           "name": "Create API key",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/auth/api-keys",
-            "body": { "mode": "raw", "raw": "{\n  \"name\": \"flutter-prod\"\n}" }
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"flutter-prod\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Logout (this device)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/logout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Logout everywhere",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/auth/logout-all"
+          }
+        },
+        {
+          "name": "Update profile",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/auth/me",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Ada Lovelace\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Change password",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/auth/change-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"current_password\": \"demopassword\",\n  \"new_password\": \"newpassword456\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Delete account",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/auth/me",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"demopassword\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Revoke API key",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/auth/api-keys/{{api_key_id}}"
           }
         }
       ]
@@ -85,15 +228,25 @@
       "item": [
         {
           "name": "Create session",
-          "event": [{
-            "listen": "test",
-            "script": { "exec": [
-              "pm.collectionVariables.set('session_id', pm.response.json().id);"
-            ], "type": "text/javascript" }
-          }],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.collectionVariables.set('session_id', pm.response.json().id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/sessions",
             "body": {
               "mode": "raw",
@@ -103,17 +256,28 @@
         },
         {
           "name": "List sessions",
-          "request": { "method": "GET", "url": "{{baseUrl}}/sessions?page=1&page_size=20" }
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/sessions?page=1&page_size=20"
+          }
         },
         {
           "name": "Get session",
-          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/{{session_id}}" }
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/sessions/{{session_id}}"
+          }
         },
         {
           "name": "Update session",
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/sessions/{{session_id}}",
             "body": {
               "mode": "raw",
@@ -123,7 +287,10 @@
         },
         {
           "name": "Delete session",
-          "request": { "method": "DELETE", "url": "{{baseUrl}}/sessions/{{session_id}}" }
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/sessions/{{session_id}}"
+          }
         }
       ]
     },
@@ -134,7 +301,12 @@
           "name": "Send message",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/sessions/{{session_id}}/messages",
             "body": {
               "mode": "raw",
@@ -147,8 +319,14 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "Accept", "value": "text/event-stream" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
             ],
             "url": "{{baseUrl}}/sessions/{{session_id}}/messages/stream",
             "body": {
@@ -161,22 +339,41 @@
           "name": "Regenerate last response",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/sessions/{{session_id}}/messages/regenerate",
-            "body": { "mode": "raw", "raw": "{\n  \"temperature\": 0.7\n}" }
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"temperature\": 0.7\n}"
+            }
           }
         },
         {
           "name": "History",
-          "request": { "method": "GET", "url": "{{baseUrl}}/sessions/{{session_id}}/messages?limit=50" }
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/sessions/{{session_id}}/messages?limit=50"
+          }
         },
         {
           "name": "Search",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": "{{baseUrl}}/search",
-            "body": { "mode": "raw", "raw": "{\n  \"query\": \"invoice\",\n  \"limit\": 20\n}" }
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"invoice\",\n  \"limit\": 20\n}"
+            }
           }
         }
       ]
@@ -186,43 +383,83 @@
       "item": [
         {
           "name": "Upload document",
-          "event": [{
-            "listen": "test",
-            "script": { "exec": [
-              "pm.collectionVariables.set('document_id', pm.response.json().document.id);"
-            ], "type": "text/javascript" }
-          }],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.collectionVariables.set('document_id', pm.response.json().document.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "url": "{{baseUrl}}/documents",
             "body": {
               "mode": "formdata",
               "formdata": [
-                { "key": "file", "type": "file" },
-                { "key": "session_id", "value": "{{session_id}}", "type": "text" }
+                {
+                  "key": "file",
+                  "type": "file"
+                },
+                {
+                  "key": "session_id",
+                  "value": "{{session_id}}",
+                  "type": "text"
+                }
               ]
             }
           }
         },
         {
           "name": "List documents",
-          "request": { "method": "GET", "url": "{{baseUrl}}/documents?page=1&page_size=20" }
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/documents?page=1&page_size=20"
+          }
         },
         {
           "name": "Get document",
-          "request": { "method": "GET", "url": "{{baseUrl}}/documents/{{document_id}}" }
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/documents/{{document_id}}"
+          }
         },
         {
           "name": "Delete document",
-          "request": { "method": "DELETE", "url": "{{baseUrl}}/documents/{{document_id}}" }
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/documents/{{document_id}}"
+          }
         }
       ]
     },
     {
       "name": "Health",
       "item": [
-        { "name": "Liveness",  "request": { "method": "GET", "url": "{{baseUrl}}/healthz" } },
-        { "name": "Readiness", "request": { "method": "GET", "url": "{{baseUrl}}/readyz" } }
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/healthz"
+          }
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/readyz"
+          }
+        },
+        {
+          "name": "Metrics (Prometheus)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/../../metrics"
+          }
+        }
       ]
     }
   ]

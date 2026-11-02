@@ -4,12 +4,12 @@
 
 <br/>
 
+[![CI](https://img.shields.io/github/actions/workflow/status/yosefyosef13054/NEXUSBOT/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=0A0A0A&color=EF4444)](https://github.com/yosefyosef13054/NEXUSBOT/actions)
 [![Python](https://img.shields.io/badge/PYTHON-3.12-0A0A0A?style=for-the-badge&logo=python&logoColor=EF4444&labelColor=0A0A0A)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FASTAPI-0.115-0A0A0A?style=for-the-badge&logo=fastapi&logoColor=EF4444&labelColor=0A0A0A)](https://fastapi.tiangolo.com/)
 [![LangChain](https://img.shields.io/badge/LANGCHAIN-0.3-0A0A0A?style=for-the-badge&logo=langchain&logoColor=EF4444&labelColor=0A0A0A)](https://www.langchain.com/)
 [![Postgres](https://img.shields.io/badge/POSTGRES-16-0A0A0A?style=for-the-badge&logo=postgresql&logoColor=EF4444&labelColor=0A0A0A)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/REDIS-7-0A0A0A?style=for-the-badge&logo=redis&logoColor=EF4444&labelColor=0A0A0A)](https://redis.io/)
-[![Docker](https://img.shields.io/badge/DOCKER-ready-0A0A0A?style=for-the-badge&logo=docker&logoColor=EF4444&labelColor=0A0A0A)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/LICENSE-MIT-EF4444?style=for-the-badge&labelColor=0A0A0A)](LICENSE)
 
 <br/>
@@ -19,7 +19,7 @@
 **The production-grade AI chatbot engine for any Flutter app.**
 **Built with FastAPI + LangChain. API-first, streaming-first, modular by design.**
 
-[Quickstart](#-quickstart) · [Features](#-features) · [Architecture](#-architecture) · [API](#-api-reference) · [Flutter App](flutter_app/) · [Postman](postman/collection.json)
+[Quickstart](#-quickstart) · [Features](#-features) · [Architecture](#-architecture) · [API](#-api-reference) · [Flutter App](https://github.com/yosefyosef13054/NEXUSBOT-APP) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -31,14 +31,15 @@ Most "AI chatbot" repos are demos: one file, one model, no persistence, no strea
 
 **NexusBot is the rebuild.** Drop it behind any Flutter app and you immediately get:
 
-- 💬 Multi-session chat with persistent history & auto-generated titles
-- ⚡ Real-time token streaming over **SSE** *and* **WebSocket**
+- 💬 Multi-session chat with persistent history & background-generated titles
+- ⚡ Real-time token streaming over **SSE** *and* **WebSocket**, with stop/cancel that keeps the partial reply
 - 📚 RAG over user-uploaded PDFs / DOCX / TXT / MD / HTML with citations
-- 🛠 Tool calling (calculator, web search, custom DB tools — extensible registry)
-- 🧠 Conversation memory with automatic rolling-summary compaction
-- 🔐 JWT + revocable API keys, per-user rate limiting, structured errors
-- 📊 Per-call AI usage logging with cost estimation
-- 🐳 One-command Docker Compose deployment
+- 🛠 Tool calling scoped to the calling user (calculator, web search, DB tools — extensible registry)
+- 🧠 Conversation memory with automatic rolling-summary compaction (off the hot path)
+- 🔐 JWT with rotating refresh tokens, revocable API keys, per-user rate limiting, account deletion
+- 📊 Provider-reported usage and cost per call, Prometheus `/metrics`, request ids everywhere
+- 🧪 Runs end-to-end without any provider key (`AI_FAKE_MODE`) — same mode the test-suite uses
+- 🐳 One-command Docker Compose deployment (dev and prod variants)
 - 📱 Flutter-ready: identical JSON event format across REST, SSE, and WS
 
 ---
@@ -46,11 +47,12 @@ Most "AI chatbot" repos are demos: one file, one model, no persistence, no strea
 ## 🚀 Quickstart
 
 ```bash
-git clone https://github.com/<your-user>/nexusbot.git
-cd nexusbot
+git clone https://github.com/yosefyosef13054/NEXUSBOT.git
+cd NEXUSBOT
 
 cp .env.example .env
-# edit .env → set OPENAI_API_KEY and JWT_SECRET_KEY at minimum
+# edit .env → set OPENAI_API_KEY (or AI_FAKE_MODE=true to run without a key)
+#             and JWT_SECRET_KEY (required in production)
 
 docker compose up --build
 ```
@@ -64,6 +66,7 @@ Then open:
 | ReDoc           | http://localhost:8000/api/v1/redoc |
 | Liveness probe  | http://localhost:8000/api/v1/healthz |
 | Readiness probe | http://localhost:8000/api/v1/readyz |
+| Prometheus      | http://localhost:8000/metrics |
 
 A 60-second end-to-end smoke test:
 
@@ -83,11 +86,19 @@ SID=$(curl -s -X POST localhost:8000/api/v1/sessions \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{}' | jq -r .id)
 
-# 4. Talk to NexusBot
+# 4. Talk to NexusBot (blocking) …
 curl -s -X POST localhost:8000/api/v1/sessions/$SID/messages \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"content":"What can you do?"}' | jq
+
+# 5. … or stream it
+curl -N -X POST localhost:8000/api/v1/sessions/$SID/messages/stream \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -H 'accept: text/event-stream' -d '{"content":"Tell me a joke"}'
 ```
+
+Production: `docker compose -f docker-compose.prod.yml up -d --build` (immutable images, no
+reload, migrations as a one-shot job, multiple uvicorn workers).
 
 ---
 
@@ -100,19 +111,19 @@ curl -s -X POST localhost:8000/api/v1/sessions/$SID/messages \
 ### 💬 Chat
 - Multi-session, multi-user
 - Persistent history (cursor pagination)
-- Auto-generated conversation titles
-- Regenerate last response
-- Full-text search across all chats
+- Titles generated in the background after the first turn
+- Regenerate last response (replays the turn's RAG/tool settings)
+- Search across all chats
 
 </td>
 <td width="50%" valign="top">
 
 ### ⚡ Streaming
 - Server-Sent Events (`/messages/stream`)
-- WebSocket (`/ws/sessions/{id}`)
+- WebSocket (`/ws/sessions/{id}`) with first-frame auth and a `stop` frame
 - **Identical JSON event format** on both
 - Tokens, citations, tool calls, usage, done
-- Heartbeat / ping support on WS
+- Disconnect or stop → model call cancelled, partial reply persisted
 
 </td>
 </tr>
@@ -120,10 +131,11 @@ curl -s -X POST localhost:8000/api/v1/sessions/$SID/messages \
 <td valign="top">
 
 ### 📚 RAG
-- File upload → async ingest via Celery
-- PDF · DOCX · MD · HTML · TXT
-- pgvector with HNSW cosine index
-- Configurable chunk size / overlap / top-k
+- File upload → async ingest via Celery, with progress %
+- PDF · DOCX · MD · HTML · TXT · CSV · JSON (sniffed, not trusted)
+- Duplicate uploads detected by SHA-256
+- pgvector with HNSW cosine index, batched embeddings
+- Retrieval skipped for users without documents
 - Inline `[doc:NAME#chunk]` citations
 
 </td>
@@ -132,9 +144,9 @@ curl -s -X POST localhost:8000/api/v1/sessions/$SID/messages \
 ### 🛠 Tool Calling
 - LangChain agent (OpenAI tools)
 - Built-in: calculator, web search, DB query
-- Registry pattern — add a tool in 1 file
-- Per-call audit log (`tool_calls` table)
-- Tool events streamed to the client
+- Every tool receives a `ToolContext` — identity comes from the request, never from the model
+- Unknown tool names rejected up front (422)
+- Per-call audit log (`tool_calls` table) and `tool_call` events streamed to the client
 
 </td>
 </tr>
@@ -144,18 +156,19 @@ curl -s -X POST localhost:8000/api/v1/sessions/$SID/messages \
 ### 🧠 Memory
 - Windowed short-term history (configurable)
 - Long-term rolling summary per session
-- Auto-compaction when token budget exceeded
-- Token-aware via `tiktoken`
+- Auto-compaction when the token budget is exceeded, after the reply is delivered
+- Token-aware via `tiktoken` (with an offline fallback)
 
 </td>
 <td valign="top">
 
 ### 🔐 Auth & Security
-- JWT (access + refresh) with bcrypt
+- JWT access tokens + **rotating** refresh tokens with reuse detection
+- Logout (one device / everywhere), change password, delete account
 - Revocable API keys (SHA-256 hashed at rest)
-- Redis token-bucket rate limiting
-- Pydantic input validation everywhere
-- Structured error envelope
+- Redis rate limiting per user (chat) and per IP (auth)
+- Production guard for weak secrets, magic-byte upload validation
+- Structured error envelope with request ids
 
 </td>
 </tr>
@@ -163,21 +176,21 @@ curl -s -X POST localhost:8000/api/v1/sessions/$SID/messages \
 <td valign="top">
 
 ### 📊 Observability
-- Structured JSON logs (structlog)
+- Structured JSON logs (structlog) with request ids
+- Prometheus `/metrics`: requests, latency, tokens, cost, tools, retrievals, ingestion
+- Provider-reported usage + cost per call in `ai_usage_logs`
 - Optional Sentry integration
-- AI usage logging with cost estimate
-- `X-Process-Time-Ms` on every response
-- Liveness + readiness probes
+- `X-Request-Id` / `X-Process-Time-Ms` on every response
 
 </td>
 <td valign="top">
 
-### 🐳 Deployment
-- One `docker compose up`
-- API + worker + beat + Postgres + Redis
+### 🐳 Deployment & DX
+- `docker compose up` for dev, `docker-compose.prod.yml` for prod
+- API + worker + Postgres (pgvector) + Redis
 - Alembic migrations
-- Async SQLAlchemy 2 with connection pooling
-- Scales horizontally
+- `AI_FAKE_MODE` for keyless local development
+- GitHub Actions CI: ruff, mypy, pytest with services, Docker build
 
 </td>
 </tr>
@@ -205,10 +218,11 @@ flowchart LR
     C3 --> T[Tools<br/>calc · web · db · custom]
     S --> DB[(Postgres<br/>+ pgvector)]
     S --> RD[(Redis)]
+    S -.after reply.-> BG[Background<br/>titles · summaries]
     API -.queues.-> W[Celery Worker]
     W --> ING[Doc Ingest<br/>load → split → embed]
     ING --> DB
-    ORCH -->|chat + embeddings| LLM[OpenAI API]
+    ORCH -->|chat + embeddings| LLM[OpenAI API<br/>or fake mode]
 ```
 
 ### Layered design — strictly one-way dependencies
@@ -227,6 +241,21 @@ flowchart LR
 
 **Principles applied:** Clean Architecture · SOLID · Dependency Injection (FastAPI `Depends`) · single LLM/embedding/vector swap point · zero coupling between API and LangChain.
 
+### How a streamed turn works
+
+1. The user message is persisted and committed, then echoed as a `user_message` event.
+2. The orchestrator loads the history window + rolling summary, runs retrieval (only if the
+   user has ready documents) and emits `citations`.
+3. The model streams through a callback collector: `token`, `tool_call` and cumulative `usage`
+   events flow to the client as they happen.
+4. `done` carries the full text, provider-reported usage and latency; the assistant message,
+   tool-call audit rows and the usage/cost row are persisted and `assistant_message` closes
+   the stream.
+5. Title generation and summary compaction run afterwards in a background task.
+
+If the client disconnects or sends `stop`, the model call is cancelled right away and the
+partial reply is persisted with `status = "interrupted"`.
+
 ---
 
 ## 📡 API Reference
@@ -240,8 +269,13 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 |---|---|---|
 | `POST`   | `/auth/register`           | Create account |
 | `POST`   | `/auth/login`              | Login → JWT pair |
-| `POST`   | `/auth/refresh`            | Refresh access token |
+| `POST`   | `/auth/refresh`            | Rotate the refresh token, get a new pair |
+| `POST`   | `/auth/logout`             | Revoke one refresh token |
+| `POST`   | `/auth/logout-all`         | Revoke every refresh token |
 | `GET`    | `/auth/me`                 | Current user profile |
+| `PATCH`  | `/auth/me`                 | Update profile |
+| `POST`   | `/auth/change-password`    | Change password (signs other devices out) |
+| `DELETE` | `/auth/me`                 | Delete account (password confirmed) |
 | `POST`   | `/auth/api-keys`           | Mint API key (shown once) |
 | `DELETE` | `/auth/api-keys/{id}`      | Revoke API key |
 
@@ -261,16 +295,16 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 | `POST` | `/sessions/{id}/messages/stream`      | **SSE stream** |
 | `POST` | `/sessions/{id}/messages/regenerate`  | Regenerate last turn |
 | `GET`  | `/sessions/{id}/messages`             | History (cursor pagination) |
-| `POST` | `/search`                             | Full-text search |
-| `WS`   | `/ws/sessions/{id}?token=...`         | **WebSocket stream** |
+| `POST` | `/search`                             | Search across chats |
+| `WS`   | `/ws/sessions/{id}`                   | **WebSocket stream** (auth in first frame) |
 
 ### Documents (RAG)
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST`   | `/documents`            | Upload → queued ingest |
+| `POST`   | `/documents`            | Upload → queued ingest (dedup by content hash) |
 | `GET`    | `/documents`            | List (paginated) |
-| `GET`    | `/documents/{id}`       | Poll status |
-| `DELETE` | `/documents/{id}`       | Soft delete |
+| `GET`    | `/documents/{id}`       | Poll status + progress |
+| `DELETE` | `/documents/{id}`       | Soft delete + remove file |
 
 ### Streaming wire format (identical for SSE & WS)
 
@@ -279,50 +313,32 @@ All authenticated endpoints accept **either** `Authorization: Bearer <jwt>` **or
 { "type": "citations",         "data": [ { "document_name": "spec.pdf", "score": 0.84, "excerpt": "…" } ] }
 { "type": "token",             "data": "Hel" }
 { "type": "token",             "data": "lo" }
-{ "type": "tool_call",         "data": { "tool": "calculator", "input": "…", "output": "…" } }
-{ "type": "usage",             "data": { "prompt_tokens": 1240, "completion_tokens": 312 } }
-{ "type": "done",              "data": { "text": "Hello!", "latency_ms": 820 } }
-{ "type": "assistant_message", "data": { "id": "…", "content": "Hello!", "citations": […] } }
+{ "type": "tool_call",         "data": { "tool": "calculator", "input": "…", "phase": "end", "output": "…" } }
+{ "type": "usage",             "data": { "prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552 } }
+{ "type": "done",              "data": { "text": "Hello!", "latency_ms": 820, "interrupted": false } }
+{ "type": "assistant_message", "data": { "id": "…", "content": "Hello!", "citations": [], "interrupted": false } }
 ```
+
+Errors: `{ "error": { "code", "message", "details" }, "request_id": "…" }` plus an `X-Request-Id` header.
 
 ---
 
 ## 📱 Flutter app
 
-A complete production-quality Flutter client ships in [**`flutter_app/`**](flutter_app/) — Riverpod state management, go_router with auth redirect, Dio + JWT refresh, SSE streaming, file upload, dark/crimson brand theme that matches the backend.
+The official cross-platform client lives in its own repository:
+[**yosefyosef13054/NEXUSBOT-APP**](https://github.com/yosefyosef13054/NEXUSBOT-APP) — Riverpod,
+go_router with real `/chat/:id` routes, Dio with single-flight token refresh, SSE and WebSocket
+streaming with stop, document upload with progress, account management, and a crimson theme
+that matches the backend.
 
 ```bash
-cd flutter_app
+git clone https://github.com/yosefyosef13054/NEXUSBOT-APP.git
+cd NEXUSBOT-APP
 flutter pub get
 flutter run --dart-define=API_BASE_URL=http://localhost:8000/api/v1
 ```
 
-Screens: **Splash · Login · Register · Session list · Chat (streaming) · Documents · Settings**.
-See [`flutter_app/README.md`](flutter_app/README.md) for architecture, design tokens, and platform-specific run commands.
-
-The integration patterns are also documented standalone in [`docs/flutter_integration.md`](docs/flutter_integration.md) if you want to embed NexusBot into an existing Flutter codebase.
-
-A taste — streaming a NexusBot reply in Flutter:
-
-```dart
-SSEClient.subscribeToSSE(
-  method: SSERequestType.POST,
-  url: '$baseUrl/sessions/$sessionId/messages/stream',
-  header: {
-    'Authorization': 'Bearer $jwt',
-    'Content-Type': 'application/json',
-    'Accept': 'text/event-stream',
-  },
-  body: {'content': 'Summarize the uploaded PDF', 'use_rag': true},
-).listen((evt) {
-  final m = jsonDecode(evt.data!);
-  switch (m['type']) {
-    case 'token':     setState(() => answer += m['data']); break;
-    case 'citations': showCitations(m['data']);            break;
-    case 'done':      markComplete(m['data']);             break;
-  }
-});
-```
+The integration patterns are documented standalone in [`docs/flutter_integration.md`](docs/flutter_integration.md) if you want to embed NexusBot into an existing Flutter codebase.
 
 ---
 
@@ -332,18 +348,19 @@ SSEClient.subscribeToSSE(
 |---|---|---|
 | API framework      | **FastAPI** + **Uvicorn**         | Async, fast, automatic OpenAPI |
 | AI orchestration   | **LangChain 0.3** + **LangGraph** | Runnable composition, agents, tools |
-| LLM / Embeddings   | **OpenAI** (swap-friendly)        | One file (`app/ai/llm.py`) to change |
+| LLM / Embeddings   | **OpenAI** (+ fake mode)          | One file (`app/ai/llm.py`) to change |
 | Database           | **PostgreSQL 16** + **pgvector**  | Single DB for relational + vector |
 | Vector index       | **HNSW (cosine)**                 | Sub-ms recall at scale |
 | Cache / Broker     | **Redis 7**                       | Rate limit, cache, Celery broker |
-| Background jobs    | **Celery**                        | Document ingestion off the hot path |
-| Migrations         | **Alembic**                       | One bootstrap migration shipped |
+| Background jobs    | **Celery** + in-process tasks     | Ingestion off the hot path; titles/summaries after the reply |
+| Migrations         | **Alembic**                       | `0001_initial`, `0002_phase1_foundation` |
 | ORM                | **SQLAlchemy 2 (async)**          | Modern typed mapping |
 | Validation         | **Pydantic v2**                   | Boundary contracts |
-| Logging            | **structlog**                     | JSON in prod, pretty in dev |
+| Logging / metrics  | **structlog** + **prometheus-client** | JSON logs with request ids, `/metrics` |
 | Error tracking     | **Sentry** (optional)             | Drop-in if `SENTRY_DSN` set |
 | Tokenization       | **tiktoken**                      | Token accounting & cost estimation |
 | Containers         | **Docker** + **Docker Compose**   | One-command bring-up |
+| Quality            | **ruff**, **mypy**, **pytest**    | CI on every push |
 
 ---
 
@@ -359,35 +376,36 @@ nexusbot/
 │  │  ├─ auth.py · sessions.py · chat.py · documents.py · ws.py · health.py
 │  │  └─ router.py
 │  ├─ ai/                    # LangChain layer
-│  │  ├─ llm.py              # Single LLM / embeddings factory
-│  │  ├─ orchestrator.py     # generate() + stream() — entry point
-│  │  ├─ callbacks.py        # Streaming token & tool callback
+│  │  ├─ llm.py              # Single LLM / embeddings factory (+ fake mode)
+│  │  ├─ fake.py             # Deterministic model for tests & keyless dev
+│  │  ├─ orchestrator.py     # generate() + stream() — cancellation, usage, metrics
+│  │  ├─ callbacks.py        # Streaming token / tool / usage collector
 │  │  ├─ prompts/            # Versioned system prompts + composer
 │  │  ├─ memory/             # Short-term window + rolling summary
 │  │  ├─ chains/             # chat · rag
-│  │  ├─ agents/             # tool_agent (OpenAI tools agent)
-│  │  ├─ tools/              # registry · calculator · web_search · db
+│  │  ├─ agents/             # tool_agent (OpenAI tools)
+│  │  ├─ tools/              # registry · context · calculator · web_search · db
 │  │  └─ rag/                # loader · splitter · embedder · retriever · pipeline
 │  ├─ services/              # auth · chat · sessions · documents · usage
 │  ├─ models/                # SQLAlchemy ORM (UUIDs, soft-delete)
 │  ├─ schemas/               # Pydantic request/response contracts
-│  ├─ core/                  # security · deps · exceptions · rate_limit · logger
-│  ├─ db/                    # Async engine + session
+│  ├─ core/                  # security · deps · exceptions · rate_limit · middleware · metrics · background · logger
+│  ├─ db/                    # Async engine + sessions (API pool, worker NullPool)
 │  ├─ cache/                 # Redis client
 │  ├─ workers/               # Celery app + tasks
 │  ├─ utils/                 # tokens · files
 │  ├─ config.py              # Centralized settings (pydantic-settings)
 │  └─ main.py                # FastAPI factory + middleware + lifespan
-├─ alembic/                  # DB migrations (0001_initial ships full schema)
+├─ alembic/                  # DB migrations
 ├─ docs/                     # api.md · flutter_integration.md
 ├─ postman/                  # Importable collection
 ├─ assets/                   # Logo · banner · architecture diagram
-├─ tests/                    # Smoke tests (no infra required)
-├─ Dockerfile
-├─ docker-compose.yml
-├─ requirements.txt
+├─ tests/                    # unit · integration · live-socket tests
+├─ .github/workflows/ci.yml
+├─ Dockerfile · docker-compose.yml · docker-compose.prod.yml
+├─ requirements.txt · requirements-dev.txt · pyproject.toml
 ├─ .env.example
-└─ README.md
+└─ README.md · CHANGELOG.md
 ```
 
 </details>
@@ -396,19 +414,27 @@ nexusbot/
 
 ## ⚙️ Configuration
 
-Every knob lives in [`.env`](.env.example). The important ones:
+Every knob lives in [`.env.example`](.env.example). The important ones:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OPENAI_API_KEY`            | —              | Required |
+| `OPENAI_API_KEY`            | —              | Required unless `AI_FAKE_MODE=true` |
+| `AI_FAKE_MODE`              | `false`        | Deterministic in-process model + embeddings, no network |
 | `OPENAI_CHAT_MODEL`         | `gpt-4o-mini`  | Any chat completion model |
 | `OPENAI_EMBEDDING_MODEL`    | `text-embedding-3-small` | Must match `OPENAI_EMBEDDING_DIM` |
-| `JWT_SECRET_KEY`            | —              | **Generate a long random string in prod** |
+| `MODEL_PRICING`             | `{}`           | JSON `{"model": [in_per_1k, out_per_1k]}` merged over built-in prices |
+| `JWT_SECRET_KEY`            | `change-me`    | **≥ 32 random chars; production refuses the default** |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` / `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `30` / `30` | Refresh tokens rotate on use |
 | `RAG_CHUNK_SIZE` / `_OVERLAP` / `_TOP_K` | `800` / `120` / `5` | Tune per corpus |
+| `EMBEDDING_BATCH_SIZE`      | `64`           | Chunks per embedding request during ingest |
 | `CHAT_MAX_HISTORY_MESSAGES` | `20`           | Windowed memory size |
-| `CHAT_SUMMARY_TRIGGER_TOKENS` | `3000`       | When summarizer kicks in |
-| `RATE_LIMIT_PER_MINUTE`     | `60`           | Per principal |
+| `CHAT_SUMMARY_TRIGGER_TOKENS` | `3000`       | When the summarizer kicks in |
+| `GENERATION_TIMEOUT_SECONDS`| `180`          | Hard cap per generation |
+| `RATE_LIMIT_PER_MINUTE`     | `60`           | Per user (chat, uploads) |
+| `AUTH_RATE_LIMIT_PER_MINUTE`| `10`           | Per IP (register, login) |
 | `MAX_UPLOAD_MB`             | `25`           | Upload guard |
+| `ALLOWED_UPLOAD_EXTENSIONS` | `.pdf,.docx,…` | Sniffed against file content |
+| `METRICS_ENABLED`           | `true`         | Exposes `/metrics` |
 | `VECTOR_BACKEND`            | `pgvector`     | Adapter slot (Pinecone/Weaviate stubs) |
 
 ---
@@ -416,23 +442,32 @@ Every knob lives in [`.env`](.env.example). The important ones:
 ## 🧪 Tests
 
 ```bash
-pip install -r requirements.txt
-pytest tests/test_smoke.py -v
+pip install -r requirements-dev.txt
+ruff check app tests && mypy app
+
+# Unit tests (no infra):
+pytest tests/test_smoke.py tests/test_unit.py
+
+# Full suite — needs Postgres (pgvector) + Redis, e.g. `docker compose up postgres redis`:
+DATABASE_URL=postgresql+asyncpg://chatbot:chatbot@127.0.0.1:5432/chatbot_test \
+SYNC_DATABASE_URL=postgresql://chatbot:chatbot@127.0.0.1:5432/chatbot_test \
+pytest
 ```
 
-Smoke tests exercise pure modules (tokenizer, prompt composer, calculator, registry) — no LLM / DB required, so CI catches regressions even without secrets.
+The suite runs with `AI_FAKE_MODE` so it never needs a provider key. It covers the auth lifecycle
+(rotation, reuse detection, logout, deletion), chat over REST/SSE/WebSocket, stop and disconnect
+handling (including a real uvicorn subprocess to exercise client disconnects over sockets),
+upload validation and dedup, ingestion, retrieval, metrics and middleware. CI runs the same on
+every push with Postgres and Redis service containers.
 
 ---
 
 ## 🛣 Roadmap
 
-- [ ] Pinecone & Weaviate vector adapters (interface ready)
-- [ ] Anthropic / Azure / Ollama LLM adapters (one-file swap)
-- [ ] Multi-modal inputs (images, audio)
-- [ ] Per-tenant prompt + model overrides via DB
-- [ ] Built-in eval harness for prompt regressions
-- [ ] Helm chart for Kubernetes deployment
-- [ ] Grafana dashboard for `ai_usage_logs`
+- [x] **Phase 1 — foundation** (v1.1): everything above actually works, CI, metrics, account lifecycle
+- [ ] **Phase 2 — AI core**: multi-provider models (OpenAI, Anthropic, Google, Azure, Ollama) with real routing, LangGraph agent with human-in-the-loop approvals, hybrid retrieval + reranking + structured citations, knowledge-base collections
+- [ ] **Phase 3 — product layer**: workspaces & roles, assistants, quotas, feedback, admin API, user memory, conversation branching, resumable streams, eval harness
+- [ ] **Phase 4 — multimodal & mobile depth**: attachments & vision, voice, artifacts, object storage, MCP tools, offline-first client, i18n/RTL, push, release pipeline
 
 PRs welcome.
 
@@ -441,8 +476,8 @@ PRs welcome.
 ## 🤝 Contributing
 
 1. Fork → create a feature branch from `main`
-2. `cp .env.example .env` and `docker compose up`
-3. Add or update tests under `tests/`
+2. `cp .env.example .env` and `docker compose up` (or `AI_FAKE_MODE=true` for keyless work)
+3. Add or update tests under `tests/`; keep `ruff`, `mypy` and `pytest` green
 4. Open a PR with a clear description and screenshots if UI-relevant
 
 Please keep PRs scoped. One reason NexusBot stays readable is that every layer has a single responsibility — don't blur the API/service/AI boundary in a single change.

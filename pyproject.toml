@@ -1,0 +1,48 @@
+[project]
+name = "nexusbot"
+version = "1.1.0"
+description = "Production-grade AI chatbot engine: FastAPI + LangChain backend for Flutter apps."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["alembic/versions", "flutter_app"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
+ignore = [
+    "E501",   # line length handled by formatter / judgment
+    "B008",   # FastAPI Depends() in defaults
+    "B904",   # raise ... from inside except is a style choice here
+    "UP035",  # typing.List etc. still used in pydantic schemas
+    "UP006",
+    "UP007",
+    "UP038",  # isinstance with tuple is fine
+    "ASYNC109",  # explicit timeout parameters are intentional
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = false
+no_implicit_optional = true
+exclude = ["alembic/", "flutter_app/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+]
+markers = [
+    "integration: needs Postgres (pgvector) and Redis",
+]

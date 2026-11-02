@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.llm import embedding_model_name
 from app.ai.rag.embedder import embed_query
 from app.config import settings
+from app.core.metrics import RAG_RETRIEVALS
 from app.models.document import Document, DocumentChunk, DocumentStatus
+from app.utils.tokens import count_tokens
 
 
 @dataclass(slots=True)
@@ -21,6 +24,28 @@ class RetrievedChunk:
     score: float
 
 
+@dataclass(slots=True)
+class RetrievalResult:
+    chunks: list[RetrievedChunk] = field(default_factory=list)
+    # False when retrieval was skipped (no ready documents) and no embedding call was made.
+    embedded: bool = False
+    query_tokens: int = 0
+
+
+async def has_ready_documents(
+    session: AsyncSession, *, user_id: UUID, session_id: UUID | None = None
+) -> bool:
+    """Cheap existence check so users without documents never pay for a query embedding."""
+    stmt = select(Document.id).where(
+        Document.user_id == user_id,
+        Document.deleted_at.is_(None),
+        Document.status == DocumentStatus.READY,
+    )
+    if session_id is not None:
+        stmt = stmt.where((Document.session_id == session_id) | (Document.session_id.is_(None)))
+    return (await session.execute(stmt.limit(1))).first() is not None
+
+
 async def retrieve_chunks(
     session: AsyncSession,
     *,
@@ -28,7 +53,7 @@ async def retrieve_chunks(
     query: str,
     session_id: UUID | None = None,
     top_k: int | None = None,
-) -> list[RetrievedChunk]:
+) -> RetrievalResult:
     """pgvector cosine retrieval scoped to the user (and optionally session).
 
     Returns chunks ordered by similarity, filtered by `RAG_SIMILARITY_THRESHOLD`.
@@ -39,6 +64,10 @@ async def retrieve_chunks(
         raise NotImplementedError(
             f"Vector backend '{settings.VECTOR_BACKEND}' adapter not implemented in this build."
         )
+
+    if not await has_ready_documents(session, user_id=user_id, session_id=session_id):
+        RAG_RETRIEVALS.labels("skipped").inc()
+        return RetrievalResult()
 
     embedding = await embed_query(query)
     k = top_k or settings.RAG_TOP_K
@@ -75,7 +104,10 @@ async def retrieve_chunks(
                 score=score,
             )
         )
-    return out
+    RAG_RETRIEVALS.labels("hit" if out else "empty").inc()
+    return RetrievalResult(
+        chunks=out, embedded=True, query_tokens=count_tokens(query, model=embedding_model_name())
+    )
 
 
 def format_context(chunks: list[RetrievedChunk]) -> str:

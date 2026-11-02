@@ -17,23 +17,31 @@ def build_chat_prompt(
     use_rag: bool = False,
     use_tools: bool = False,
 ) -> ChatPromptTemplate:
-    """Compose the chat prompt from the requested capabilities."""
+    """Compose the chat prompt from the requested capabilities.
+
+    Input variables at invoke time: `input`, `history`, `summary`, plus `context` when
+    `use_rag` and `agent_scratchpad` (injected by the agent executor) when `use_tools`.
+    """
     parts: list[str] = [system_prompt or DEFAULT_ASSISTANT_V1]
     if use_rag:
         parts.append(RAG_GROUNDING_V1)
         parts.append("Retrieved context:\n{context}")
     if use_tools:
         parts.append(TOOL_USE_V1)
-    if "summary" not in "".join(parts):
+    if "{summary}" not in "".join(parts):
         parts.append("Conversation summary (if any):\n{summary}")
 
-    return ChatPromptTemplate.from_messages(
-        [
-            ("system", "\n\n".join(parts)),
-            MessagesPlaceholder("history"),
-            ("human", "{input}"),
-        ]
-    )
+    messages: list = [
+        ("system", "\n\n".join(parts)),
+        MessagesPlaceholder("history"),
+        ("human", "{input}"),
+    ]
+    if use_tools:
+        # Required by `create_openai_tools_agent`: the executor appends tool call/result
+        # pairs here on every iteration of the agent loop.
+        messages.append(MessagesPlaceholder("agent_scratchpad", optional=True))
+
+    return ChatPromptTemplate.from_messages(messages)
 
 
 SUMMARIZER_PROMPT = ChatPromptTemplate.from_messages(

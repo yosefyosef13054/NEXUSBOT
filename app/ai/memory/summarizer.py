@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 

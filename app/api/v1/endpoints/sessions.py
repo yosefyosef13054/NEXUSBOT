@@ -40,11 +40,10 @@ async def list_sessions(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await session_service.list_sessions(
-        db, user_id=user.id, page=page, page_size=page_size
+    items, total = await session_service.list_sessions(db, user_id=user.id, page=page, page_size=page_size)
+    return Page(
+        items=[SessionRead.model_validate(i) for i in items], total=total, page=page, page_size=page_size
     )
-    return Page(items=[SessionRead.model_validate(i) for i in items],
-                total=total, page=page, page_size=page_size)
 
 
 @router.get("/{session_id}", response_model=SessionRead)

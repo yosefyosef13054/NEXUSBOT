@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
@@ -9,19 +12,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppException, UnauthorizedError
 from app.core.logger import get_logger
 from app.db.session import AsyncSessionLocal
+from app.models.user import User
 from app.services import chat_service
 from app.services.auth_service import get_user_by_api_key, get_user_by_token
 
 router = APIRouter(tags=["websocket"])
 logger = get_logger(__name__)
 
+AUTH_FRAME_TIMEOUT_SECONDS = 10
 
-async def _authenticate_ws(db: AsyncSession, token: str | None, api_key: str | None):
+
+async def _authenticate_ws(db: AsyncSession, token: str | None, api_key: str | None) -> User:
     if token:
         return await get_user_by_token(db, token)
     if api_key:
         return await get_user_by_api_key(db, api_key)
     raise UnauthorizedError("Missing credentials")
+
+
+async def _auth_from_first_frame(websocket: WebSocket, db: AsyncSession) -> User:
+    """Credentials arrive in the first frame, not the URL, so they never land in access logs."""
+    raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_FRAME_TIMEOUT_SECONDS)
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise UnauthorizedError("First frame must be an auth JSON frame") from e
+    if not isinstance(msg, dict) or msg.get("type") != "auth":
+        raise UnauthorizedError("First frame must be {type: 'auth', token | api_key}")
+    return await _authenticate_ws(db, msg.get("token"), msg.get("api_key"))
+
+
+def _error(code: str, message: str) -> dict[str, Any]:
+    return {"type": "error", "data": {"code": code, "message": message}}
 
 
 @router.websocket("/ws/sessions/{session_id}")
@@ -34,20 +56,73 @@ async def chat_ws(
     """Bidirectional chat stream.
 
     Client → server frames (JSON):
+        { "type": "auth", "token": "<jwt>" }            first frame (or "api_key")
         { "type": "user_message", "content": "...", "use_rag": true, "use_tools": false }
+        { "type": "stop" }                               cancel the in-flight generation
+        { "type": "ping" }
 
     Server → client frames (JSON):
-        { "type": "token" | "citations" | "tool_call" | "usage" | "done" | "assistant_message" | "error", "data": ... }
+        { "type": "auth_ok" | "token" | "citations" | "tool_call" | "usage" | "done"
+                 | "assistant_message" | "error" | "pong", "data": ... }
+
+    Query-string credentials (`?token=`) are still accepted for older clients but logged
+    as deprecated.
     """
     await websocket.accept()
 
     async with AsyncSessionLocal() as db:
         try:
-            user = await _authenticate_ws(db, token, api_key)
+            if token or api_key:
+                logger.warning("ws_query_string_auth_deprecated", session_id=str(session_id))
+                user = await _authenticate_ws(db, token, api_key)
+            else:
+                user = await _auth_from_first_frame(websocket, db)
         except AppException as e:
-            await websocket.send_json({"type": "error", "data": {"code": e.code, "message": e.message}})
+            await websocket.send_json(_error(e.code, e.message))
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
+        except TimeoutError:
+            await websocket.send_json(_error("auth_timeout", "No auth frame received"))
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        except WebSocketDisconnect:
+            return
+
+        await websocket.send_json({"type": "auth_ok", "data": {"user_id": str(user.id)}})
+
+        send_lock = asyncio.Lock()
+        generation: asyncio.Task | None = None
+        stop_event: asyncio.Event | None = None
+
+        async def _send(payload: dict[str, Any]) -> None:
+            async with send_lock:
+                await websocket.send_json(payload)
+
+        async def _run_generation(msg: dict[str, Any], stop: asyncio.Event) -> None:
+            try:
+                async for evt in chat_service.stream_message(
+                    db,
+                    user_id=user.id,
+                    session_id=session_id,
+                    content=str(msg.get("content") or "").strip(),
+                    use_rag=bool(msg.get("use_rag", True)),
+                    use_tools=bool(msg.get("use_tools", False)),
+                    tool_names=msg.get("tool_names"),
+                    temperature=msg.get("temperature"),
+                    max_tokens=msg.get("max_tokens"),
+                    stop_event=stop,
+                ):
+                    await _send(evt)
+            except AppException as e:
+                await db.rollback()
+                await _send(_error(e.code, e.message))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.exception("ws_chat_failed")
+                await db.rollback()
+                with contextlib.suppress(Exception):
+                    await _send(_error("internal_error", str(e)[:300]))
 
         try:
             while True:
@@ -55,38 +130,33 @@ async def chat_ws(
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
-                    await websocket.send_json({"type": "error", "data": {"message": "Invalid JSON"}})
+                    await _send(_error("bad_request", "Invalid JSON"))
+                    continue
+                if not isinstance(msg, dict):
+                    await _send(_error("bad_request", "Frame must be a JSON object"))
                     continue
 
-                if msg.get("type") == "ping":
-                    await websocket.send_json({"type": "pong"})
-                    continue
-                if msg.get("type") != "user_message":
-                    await websocket.send_json({"type": "error", "data": {"message": "Unknown message type"}})
-                    continue
-
-                content = (msg.get("content") or "").strip()
-                if not content:
-                    await websocket.send_json({"type": "error", "data": {"message": "Empty content"}})
-                    continue
-
-                try:
-                    async for evt in chat_service.stream_message(
-                        db,
-                        user_id=user.id,
-                        session_id=session_id,
-                        content=content,
-                        use_rag=bool(msg.get("use_rag", True)),
-                        use_tools=bool(msg.get("use_tools", False)),
-                        tool_names=msg.get("tool_names"),
-                        temperature=msg.get("temperature"),
-                        max_tokens=msg.get("max_tokens"),
-                    ):
-                        await websocket.send_json(evt)
-                except AppException as e:
-                    await websocket.send_json({"type": "error", "data": {"code": e.code, "message": e.message}})
-                except Exception as e:  # noqa: BLE001
-                    logger.exception("ws_chat_failed")
-                    await websocket.send_json({"type": "error", "data": {"message": str(e)[:300]}})
+                kind = msg.get("type")
+                if kind == "ping":
+                    await _send({"type": "pong"})
+                elif kind == "stop":
+                    if generation is not None and not generation.done() and stop_event is not None:
+                        stop_event.set()
+                elif kind == "user_message":
+                    if generation is not None and not generation.done():
+                        await _send(_error("busy", "A generation is already in progress"))
+                        continue
+                    if not str(msg.get("content") or "").strip():
+                        await _send(_error("bad_request", "Empty content"))
+                        continue
+                    stop_event = asyncio.Event()
+                    generation = asyncio.create_task(_run_generation(msg, stop_event))
+                else:
+                    await _send(_error("bad_request", "Unknown message type"))
         except WebSocketDisconnect:
-            return
+            pass
+        finally:
+            if generation is not None and not generation.done():
+                generation.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await generation

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -28,8 +29,12 @@ def _encode(payload: dict[str, Any]) -> str:
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+def new_jti() -> str:
+    return secrets.token_urlsafe(24)
+
+
 def create_access_token(user_id: UUID, *, extra: dict | None = None) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "type": ACCESS,
@@ -41,15 +46,19 @@ def create_access_token(user_id: UUID, *, extra: dict | None = None) -> str:
     return _encode(payload)
 
 
-def create_refresh_token(user_id: UUID) -> str:
-    now = datetime.now(timezone.utc)
+def create_refresh_token(user_id: UUID, *, jti: str, family_id: str) -> tuple[str, datetime]:
+    """Returns the signed refresh token and its expiry (persisted alongside the `jti`)."""
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": str(user_id),
         "type": REFRESH,
+        "jti": jti,
+        "fam": family_id,
         "iat": now,
-        "exp": now + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS),
+        "exp": expires_at,
     }
-    return _encode(payload)
+    return _encode(payload), expires_at
 
 
 def decode_token(token: str, *, expected_type: str | None = None) -> dict[str, Any]:

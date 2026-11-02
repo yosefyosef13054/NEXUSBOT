@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -43,17 +43,17 @@ async def get_session(db: AsyncSession, *, user_id: UUID, session_id: UUID) -> C
 async def list_sessions(
     db: AsyncSession, *, user_id: UUID, page: int, page_size: int
 ) -> tuple[list[ChatSession], int]:
-    base = select(ChatSession).where(
-        ChatSession.user_id == user_id, ChatSession.deleted_at.is_(None)
-    )
+    base = select(ChatSession).where(ChatSession.user_id == user_id, ChatSession.deleted_at.is_(None))
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
-        await db.execute(
-            base.order_by(ChatSession.updated_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+        (
+            await db.execute(
+                base.order_by(ChatSession.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows), int(total)
 
 
@@ -83,7 +83,7 @@ async def update_session(
 
 async def soft_delete_session(db: AsyncSession, *, user_id: UUID, session_id: UUID) -> None:
     obj = await get_session(db, user_id=user_id, session_id=session_id)
-    obj.deleted_at = datetime.now(timezone.utc)
+    obj.deleted_at = datetime.now(UTC)
     await db.flush()
 
 

@@ -75,9 +75,19 @@ class StreamEvent(BaseModel):
     """Wire format for SSE / WebSocket streaming events."""
 
     type: Literal[
-        "session", "user_message", "token", "tool_call", "citations", "usage", "done", "error"
+        "auth_ok",
+        "pong",
+        "session",
+        "user_message",
+        "token",
+        "tool_call",
+        "citations",
+        "usage",
+        "done",
+        "assistant_message",
+        "error",
     ]
-    data: Any
+    data: Any = None
 
 
 class RegenerateRequest(BaseModel):
@@ -90,6 +100,7 @@ class RegenerateResponse(BaseModel):
     assistant_message: MessageRead
     citations: list[Citation] = Field(default_factory=list)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    usage: dict[str, int] = Field(default_factory=dict)
 
 
 class SearchRequest(BaseModel):

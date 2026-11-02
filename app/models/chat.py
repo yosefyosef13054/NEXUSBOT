@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import enum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import Enum, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class MessageRole(str, enum.Enum):
@@ -30,8 +35,8 @@ class ChatSession(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    user: Mapped["User"] = relationship(back_populates="sessions")  # type: ignore[name-defined]
-    messages: Mapped[list["ChatMessage"]] = relationship(
+    user: Mapped[User] = relationship(back_populates="sessions")
+    messages: Mapped[list[ChatMessage]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
         order_by="ChatMessage.created_at.asc()",

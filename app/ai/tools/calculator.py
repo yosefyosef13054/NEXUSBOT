@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import ast
 import operator as op
-from typing import Type
+from collections.abc import Callable
+from typing import Any, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-_OPS = {
-    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv,
-    ast.Pow: op.pow, ast.Mod: op.mod, ast.FloorDiv: op.floordiv,
-    ast.USub: op.neg, ast.UAdd: op.pos,
+_OPS: dict[type, Callable[..., Any]] = {
+    ast.Add: op.add,
+    ast.Sub: op.sub,
+    ast.Mult: op.mul,
+    ast.Div: op.truediv,
+    ast.Pow: op.pow,
+    ast.Mod: op.mod,
+    ast.FloorDiv: op.floordiv,
+    ast.USub: op.neg,
+    ast.UAdd: op.pos,
 }
 
 

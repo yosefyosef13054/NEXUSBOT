@@ -6,15 +6,10 @@ from uuid import UUID
 from celery.utils.log import get_task_logger
 
 from app.ai.rag.pipeline import ingest_document
-from app.db.session import db_session
+from app.db.session import worker_db_session
 from app.workers.celery_app import celery
 
 logger = get_task_logger(__name__)
-
-
-def _run(coro):
-    """Run an async coroutine from a sync Celery task body."""
-    return asyncio.get_event_loop().run_until_complete(coro) if asyncio.get_event_loop().is_running() is False else asyncio.run(coro)
 
 
 @celery.task(
@@ -26,16 +21,20 @@ def _run(coro):
     acks_late=True,
 )
 def ingest_document_task(document_id: str) -> dict:
-    """Background ingestion: load, split, embed, persist chunks."""
+    """Background ingestion: load, split, embed, persist chunks.
+
+    Each task runs on a fresh event loop; `worker_db_session` uses a NullPool engine so
+    no asyncpg connection outlives the loop it was created on.
+    """
     doc_uuid = UUID(document_id)
 
-    async def _do():
-        async with db_session() as session:
+    async def _do() -> None:
+        async with worker_db_session() as session:
             await ingest_document(session, document_id=doc_uuid)
 
     try:
         asyncio.run(_do())
         return {"document_id": document_id, "status": "ready"}
-    except Exception as e:  # noqa: BLE001
+    except Exception:
         logger.exception("ingest_task_failed", extra={"document_id": document_id})
         raise

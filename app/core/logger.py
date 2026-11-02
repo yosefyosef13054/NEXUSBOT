@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from typing import Any
 
 import structlog
 
@@ -15,13 +16,14 @@ def configure_logging() -> None:
     """
     timestamper = structlog.processors.TimeStamper(fmt="iso")
 
-    shared_processors = [
+    shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         timestamper,
         structlog.processors.StackInfoRenderer(),
     ]
 
+    renderer: Any
     if settings.is_production:
         renderer = structlog.processors.JSONRenderer()
     else:
@@ -29,9 +31,7 @@ def configure_logging() -> None:
 
     structlog.configure(
         processors=shared_processors + [renderer],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            logging.getLevelName(settings.LOG_LEVEL)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelName(settings.LOG_LEVEL)),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
         cache_logger_on_first_use=True,

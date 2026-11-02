@@ -1,24 +1,34 @@
 # Flutter Integration Guide
 
-This backend is API-first. Drop the snippets below into any Flutter app (mobile or web).
+This backend is API-first. Drop the snippets below into any Flutter app (mobile, desktop, web).
+The official client, [NEXUSBOT-APP](https://github.com/yosefyosef13054/NEXUSBOT-APP), implements
+all of this with Riverpod and go_router if you prefer a complete reference.
 
 > Recommended packages:
 > ```yaml
 > dependencies:
 >   dio: ^5.7.0
 >   web_socket_channel: ^3.0.0
->   flutter_client_sse: ^2.0.2   # or roll your own with `http`
->   shared_preferences: ^2.3.0
+>   flutter_secure_storage: ^9.2.0   # tokens belong in the Keychain / Keystore
 > ```
+> No SSE package is needed: Dio can read the event stream itself (section 4), which also means
+> the token-refresh interceptor applies to streaming requests.
 
 ---
 
-## 1. API client (Dio + JWT refresh)
+## 1. API client (Dio + single-flight JWT refresh)
+
+Refresh tokens **rotate**: every `/auth/refresh` returns a new pair and retires the old one, and a
+retired token presented again later revokes the whole login. Two consequences for the client:
+
+- always store the returned `refresh_token`;
+- never run two refreshes at once — share one in-flight refresh between concurrent 401s.
 
 ```dart
 // lib/api/api_client.dart
+import 'dart:async';
 import 'package:dio/dio.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class ApiClient {
   ApiClient(this.baseUrl) {
@@ -33,25 +43,42 @@ class ApiClient {
 
   final String baseUrl;
   late final Dio dio;
-  String? _accessToken;
-  String? _refreshToken;
+  final _store = const FlutterSecureStorage();
+  Future<String?>? _refreshInFlight;
 
-  Future<void> loadTokens() async {
-    final prefs = await SharedPreferences.getInstance();
-    _accessToken = prefs.getString('access_token');
-    _refreshToken = prefs.getString('refresh_token');
-  }
+  Future<String?> accessToken() => _store.read(key: 'access_token');
+  Future<String?> refreshToken() => _store.read(key: 'refresh_token');
 
   Future<void> setTokens(String access, String refresh) async {
-    _accessToken = access;
-    _refreshToken = refresh;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('access_token', access);
-    await prefs.setString('refresh_token', refresh);
+    await _store.write(key: 'access_token', value: access);
+    await _store.write(key: 'refresh_token', value: refresh);
   }
 
-  String? get accessToken => _accessToken;
-  String? get refreshToken => _refreshToken;
+  Future<void> clearTokens() async {
+    await _store.delete(key: 'access_token');
+    await _store.delete(key: 'refresh_token');
+  }
+
+  /// Exchanges the refresh token for a new pair. Concurrent callers share one call.
+  Future<String?> refresh() => _refreshInFlight ??= _doRefresh().whenComplete(() => _refreshInFlight = null);
+
+  Future<String?> _doRefresh() async {
+    final current = await refreshToken();
+    if (current == null) return null;
+    try {
+      // A bare Dio: no interceptors, so a failing refresh can never recurse.
+      final r = await Dio(BaseOptions(baseUrl: baseUrl))
+          .post('/auth/refresh', data: {'refresh_token': current});
+      await setTokens(r.data['access_token'], r.data['refresh_token']);
+      return r.data['access_token'] as String;
+    } on DioException catch (e) {
+      final status = e.response?.statusCode ?? 0;
+      if (status == 401 || (status >= 400 && status < 500 && status != 429)) {
+        await clearTokens(); // definitively rejected → sign the user out
+      }
+      return null; // network / 5xx: keep the tokens, retry later
+    }
+  }
 }
 
 class _AuthInterceptor extends Interceptor {
@@ -59,25 +86,25 @@ class _AuthInterceptor extends Interceptor {
   final ApiClient client;
 
   @override
-  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    if (client.accessToken != null && options.headers['Authorization'] == null) {
-      options.headers['Authorization'] = 'Bearer ${client.accessToken}';
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) async {
+    final token = await client.accessToken();
+    if (token != null && options.headers['Authorization'] == null) {
+      options.headers['Authorization'] = 'Bearer $token';
     }
     handler.next(options);
   }
 
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) async {
-    if (err.response?.statusCode == 401 && client.refreshToken != null) {
-      try {
-        final r = await client.dio.post('/auth/refresh',
-            data: {'refresh_token': client.refreshToken});
-        await client.setTokens(r.data['access_token'], r.data['refresh_token']);
-        final req = err.requestOptions;
-        req.headers['Authorization'] = 'Bearer ${client.accessToken}';
-        final retried = await client.dio.fetch(req);
-        return handler.resolve(retried);
-      } catch (_) { /* fall through */ }
+    final req = err.requestOptions;
+    final retried = req.extra['retried'] == true;
+    if (err.response?.statusCode == 401 && !retried && !req.path.contains('/auth/')) {
+      final token = await client.refresh();
+      if (token != null) {
+        req.headers['Authorization'] = 'Bearer $token';
+        req.extra['retried'] = true;
+        return handler.resolve(await client.dio.fetch(req));
+      }
     }
     handler.next(err);
   }
@@ -86,13 +113,33 @@ class _AuthInterceptor extends Interceptor {
 
 ---
 
-## 2. Auth
+## 2. Auth lifecycle
 
 ```dart
 Future<void> login(ApiClient api, String email, String pass) async {
-  final r = await api.dio.post('/auth/login',
-      data: {'email': email, 'password': pass});
+  final r = await api.dio.post('/auth/login', data: {'email': email, 'password': pass});
   await api.setTokens(r.data['access_token'], r.data['refresh_token']);
+}
+
+Future<void> logout(ApiClient api) async {
+  final refresh = await api.refreshToken();
+  if (refresh != null) {
+    // Best effort: revoke this device's refresh token server-side.
+    try { await api.dio.post('/auth/logout', data: {'refresh_token': refresh}); } catch (_) {}
+  }
+  await api.clearTokens();
+}
+
+Future<void> changePassword(ApiClient api, String current, String next) async {
+  final r = await api.dio.post('/auth/change-password',
+      data: {'current_password': current, 'new_password': next});
+  await api.setTokens(r.data['access_token'], r.data['refresh_token']); // other devices are signed out
+}
+
+/// App-store rules require in-app account deletion. Password confirmation is mandatory.
+Future<void> deleteAccount(ApiClient api, String password) async {
+  await api.dio.delete('/auth/me', data: {'password': password});
+  await api.clearTokens();
 }
 ```
 
@@ -106,90 +153,141 @@ Future<String> createSession(ApiClient api) async {
   return r.data['id'] as String;
 }
 
-Future<Map<String, dynamic>> sendMessage(
-  ApiClient api, String sessionId, String content) async {
+Future<Map<String, dynamic>> sendMessage(ApiClient api, String sessionId, String content) async {
   final r = await api.dio.post('/sessions/$sessionId/messages',
       data: {'content': content, 'use_rag': true});
-  return r.data;
+  return r.data; // user_message, assistant_message, citations, tool_calls, usage
 }
 ```
 
+Titles are generated in the background after the first reply: re-fetch `GET /sessions` a couple
+of seconds after a turn completes.
+
 ---
 
-## 4. Server-Sent Events streaming
+## 4. Server-Sent Events streaming (through Dio)
 
 ```dart
-import 'package:flutter_client_sse/flutter_client_sse.dart';
+import 'dart:async';
 import 'dart:convert';
+import 'package:dio/dio.dart';
 
-void streamMessage(ApiClient api, String sessionId, String content,
-    void Function(Map<String, dynamic>) onEvent) {
-  SSEClient.subscribeToSSE(
-    method: SSERequestType.POST,
-    url: '${api.baseUrl}/sessions/$sessionId/messages/stream',
-    header: {
-      'Authorization': 'Bearer ${api.accessToken}',
-      'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
-    },
-    body: {'content': content, 'use_rag': true},
-  ).listen((event) {
-    if (event.data == null || event.data!.isEmpty) return;
-    onEvent(jsonDecode(event.data!));
-  });
+/// Parses `data: <json>` frames out of a text/event-stream body.
+Stream<Map<String, dynamic>> sseFrames(Stream<List<int>> bytes) async* {
+  var buffer = '';
+  await for (final chunk in utf8.decoder.bind(bytes)) {
+    buffer += chunk;
+    while (true) {
+      final end = buffer.indexOf('\n\n');
+      if (end < 0) break;
+      final block = buffer.substring(0, end);
+      buffer = buffer.substring(end + 2);
+      final data = block
+          .split('\n')
+          .where((l) => l.startsWith('data:'))
+          .map((l) => l.substring(5).trim())
+          .join('\n');
+      if (data.isNotEmpty) yield jsonDecode(data) as Map<String, dynamic>;
+      // Lines starting with ':' are comments (the server sends ': connected' first).
+    }
+  }
+}
+
+/// Returns the event stream plus a token that cancels the generation when the user taps Stop.
+(Stream<Map<String, dynamic>>, CancelToken) streamMessage(
+    ApiClient api, String sessionId, String content) {
+  final cancel = CancelToken();
+  final events = () async* {
+    final r = await api.dio.post<ResponseBody>(
+      '/sessions/$sessionId/messages/stream',
+      data: {'content': content, 'use_rag': true},
+      cancelToken: cancel,
+      options: Options(
+        responseType: ResponseType.stream,
+        receiveTimeout: const Duration(minutes: 5), // applied between chunks
+        headers: {'Accept': 'text/event-stream'},
+      ),
+    );
+    yield* sseFrames(r.data!.stream);
+  }();
+  return (events, cancel);
 }
 ```
 
 Render UI as events arrive:
 
 ```dart
-streamMessage(api, sid, 'Hello!', (evt) {
+final (events, cancel) = streamMessage(api, sid, 'Hello!');
+events.listen((evt) {
   switch (evt['type']) {
-    case 'token':       append(evt['data']);            break;
-    case 'citations':   showCitations(evt['data']);     break;
-    case 'tool_call':   showToolBadge(evt['data']);     break;
-    case 'done':        markComplete(evt['data']);      break;
-    case 'error':       showError(evt['data']);         break;
+    case 'token':             append(evt['data']);                  break;
+    case 'citations':         showCitations(evt['data']);           break;
+    case 'tool_call':         showToolBadge(evt['data']);           break;
+    case 'usage':             showUsage(evt['data']);               break;
+    case 'done':              markComplete(evt['data']);            break; // data.interrupted
+    case 'assistant_message': replaceWithPersisted(evt['data']);    break;
+    case 'error':             showError(evt['data']);               break;
   }
 });
+// Stop button: cancelling closes the connection. The server cancels the model call and
+// persists the partial reply (status "interrupted"), so history stays consistent.
+stopButton.onPressed = () => cancel.cancel('user stopped');
 ```
+
+Note for Flutter **web**: Dio's browser adapter delivers the body only when the response completes,
+so tokens do not arrive incrementally over SSE. Use the WebSocket transport on web.
 
 ---
 
 ## 5. WebSocket
 
+Credentials go in the **first frame**, not the URL.
+
 ```dart
-import 'package:web_socket_channel/web_socket_channel.dart';
+import 'dart:async';
 import 'dart:convert';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 class ChatSocket {
-  ChatSocket(this.base, this.token, this.sessionId);
-  final String base;     // e.g. ws://10.0.2.2:8000/api/v1
-  final String token;
+  ChatSocket(this.base, this.sessionId);
+  final String base;      // e.g. ws://10.0.2.2:8000/api/v1
   final String sessionId;
   WebSocketChannel? _ch;
 
-  Stream<Map<String, dynamic>> connect() {
-    final uri = Uri.parse('$base/ws/sessions/$sessionId?token=$token');
-    _ch = WebSocketChannel.connect(uri);
-    return _ch!.stream.map((raw) => jsonDecode(raw as String) as Map<String, dynamic>);
+  /// Connects, authenticates and returns the event stream (auth_ok / pong filtered out).
+  Future<Stream<Map<String, dynamic>>> connect(String accessToken) async {
+    _ch = WebSocketChannel.connect(Uri.parse('$base/ws/sessions/$sessionId'));
+    final frames = _ch!.stream
+        .map((raw) => jsonDecode(raw as String) as Map<String, dynamic>)
+        .asBroadcastStream();
+    _ch!.sink.add(jsonEncode({'type': 'auth', 'token': accessToken}));
+    final first = await frames.first.timeout(const Duration(seconds: 10));
+    if (first['type'] != 'auth_ok') {
+      throw StateError('auth failed: ${first['data']}'); // server closes with 1008
+    }
+    return frames.where((e) => e['type'] != 'pong');
   }
 
   void send(String content, {bool useRag = true, bool useTools = false}) {
     _ch?.sink.add(jsonEncode({
-      'type': 'user_message',
-      'content': content,
-      'use_rag': useRag,
-      'use_tools': useTools,
+      'type': 'user_message', 'content': content,
+      'use_rag': useRag, 'use_tools': useTools, 'tool_names': null, 'temperature': null,
     }));
   }
+
+  /// Cancels the in-flight generation. Keep listening: `done` and `assistant_message`
+  /// still arrive, with `interrupted: true` and the partial text.
+  void stop() => _ch?.sink.add(jsonEncode({'type': 'stop'}));
 
   void ping() => _ch?.sink.add(jsonEncode({'type': 'ping'}));
   Future<void> close() async => _ch?.sink.close();
 }
 ```
 
-Auto-reconnect skeleton:
+Sending a second `user_message` while one is in flight yields
+`{"type":"error","data":{"code":"busy"}}`; the running generation continues.
+
+Auto-reconnect skeleton (refresh the access token before reconnecting):
 
 ```dart
 Future<void> withReconnect(Future<void> Function() run) async {
@@ -211,22 +309,23 @@ Future<void> withReconnect(Future<void> Function() run) async {
 ## 6. Upload a document for RAG
 
 ```dart
-Future<Map<String, dynamic>> uploadDocument(
-  ApiClient api, String path, {String? sessionId}) async {
+Future<Map<String, dynamic>> uploadDocument(ApiClient api, String path, {String? sessionId}) async {
   final form = FormData.fromMap({
     'file': await MultipartFile.fromFile(path),
     if (sessionId != null) 'session_id': sessionId,
   });
   final r = await api.dio.post('/documents', data: form);
-  return r.data; // contains document.id + status (pending)
+  // r.data['queued'] == false → identical content already uploaded; r.data['document'] is the existing one.
+  return r.data;
 }
 
 Future<bool> waitUntilReady(ApiClient api, String docId,
-    {Duration interval = const Duration(seconds: 2),
-     int maxAttempts = 60}) async {
+    {Duration interval = const Duration(seconds: 2), int maxAttempts = 60,
+     void Function(int percent)? onProgress}) async {
   for (var i = 0; i < maxAttempts; i++) {
     final r = await api.dio.get('/documents/$docId');
     final s = r.data['status'] as String;
+    onProgress?.call((r.data['meta']?['progress'] as num?)?.toInt() ?? 0);
     if (s == 'ready') return true;
     if (s == 'failed') return false;
     await Future.delayed(interval);
@@ -235,42 +334,51 @@ Future<bool> waitUntilReady(ApiClient api, String docId,
 }
 ```
 
+Only the allow-listed extensions are accepted, and the bytes must match the extension (a `.pdf`
+that is not a PDF is rejected with `validation_error`). The `Content-Type` you send is ignored.
+
 ---
 
 ## 7. Error envelope
 
-Every error from the API has the same shape:
+Every error from the API has the same shape, and carries the request id you can quote in bug reports:
 
 ```dart
 class ApiError {
-  ApiError(this.code, this.message, [this.details]);
+  ApiError(this.code, this.message, {this.details, this.requestId});
   final String code, message;
   final Map<String, dynamic>? details;
+  final String? requestId;
 
   factory ApiError.from(DioException e) {
     final body = e.response?.data;
+    final requestId = e.response?.headers.value('x-request-id');
     if (body is Map && body['error'] is Map) {
       final m = body['error'] as Map;
       return ApiError(m['code'] ?? 'unknown', m['message'] ?? '',
-          (m['details'] as Map?)?.cast<String, dynamic>());
+          details: (m['details'] as Map?)?.cast<String, dynamic>(),
+          requestId: body['request_id'] as String? ?? requestId);
     }
-    return ApiError('network_error', e.message ?? 'Network error');
+    return ApiError('network_error', e.message ?? 'Network error', requestId: requestId);
   }
 }
 ```
 
 Common codes you'll handle:
-- `unauthorized`, `forbidden`, `not_found`
-- `rate_limited` (back off using `details.window_seconds`)
-- `validation_error`
-- `ai_provider_error` (transient — retry once)
+- `unauthorized` (after a failed refresh → go to login), `forbidden`, `not_found`
+- `rate_limited` (back off using `details.retry_after_seconds` / the `Retry-After` header)
+- `validation_error` (`details.unknown` for unknown tool names, `details.allowed_extensions` for uploads)
+- `ai_provider_error` (transient — retry once), `service_unavailable` (ingestion queue down)
 
 ---
 
 ## 8. Production tips for Flutter
 
 - Use `X-API-Key` for server-to-server / desktop integrations; JWT for end-user logins.
+- Decode the access token's `exp` claim and refresh proactively before opening a long stream —
+  a token that expires mid-stream cannot be refreshed transparently.
 - On Android emulator, `http://10.0.2.2:8000` reaches the host.
 - For SSE on iOS, ensure `Info.plist` allows the HTTP host (or use TLS).
 - Keep the SSE/WS event handlers idempotent — UI re-renders shouldn't break if the same `done` arrives twice.
-- Persist `session_id` alongside chat state so refresh restores the conversation.
+- Treat `done.data.text` as authoritative over the tokens you accumulated.
+- Put the session id in the route (`/chat/:id`) so a web refresh restores the conversation.

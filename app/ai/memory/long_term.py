@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ChatSession
@@ -18,9 +17,7 @@ async def load_session_summary(session: AsyncSession, *, session_id: UUID) -> st
     return (row.summary or "") if row else ""
 
 
-async def save_session_summary(
-    session: AsyncSession, *, session_id: UUID, summary: str
-) -> None:
+async def save_session_summary(session: AsyncSession, *, session_id: UUID, summary: str) -> None:
     row = await session.get(ChatSession, session_id)
     if row is None:
         return
